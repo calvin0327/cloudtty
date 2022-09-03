@@ -16,8 +16,8 @@ jobs:
   docker-build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@master
-        name: Get the version
+      - name: Get the version
+        uses: actions/checkout@master
         id: get_version
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
