@@ -3,7 +3,7 @@ kind: ConfigMap
 metadata:
   name: {{ include "jobTemplate.config.fullname" . }}
   namespace: {{ .Release.Namespace }}
-data: 
+data:
   job-temp.yaml: |
     apiVersion: batch/v1
     kind: Job
@@ -11,15 +11,11 @@ data:
       namespace: {{`{{ .Namespace }}`}}
       name: {{`{{ .Name }}`}}
       labels:
-        ownership: {{`{{ .Ownership }}`}}
         {{- if .Values.labels }}
         {{- include "common.tplvalues.render" ( dict "value" .Values.jobTemplate.labels "context" $ ) | nindent 4 }}
         {{- end }}
     spec:
-      activeDeadlineSeconds: 3600
-      ttlSecondsAfterFinished: 60
-      parallelism: 1
-      completions: 1
+      ttlSecondsAfterFinished: 30
       template:
         spec:
           automountServiceAccountToken: false
@@ -72,7 +68,7 @@ data:
               periodSeconds: 20
           restartPolicy: Never
           volumes:
-          - configMap:
+          - secret:
               defaultMode: 420
-              name: {{`{{ .Configmap }}`}}
+              secretName: {{`{{ .Secret }}`}}
             name: kubeconfig

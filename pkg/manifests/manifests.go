@@ -23,19 +23,14 @@ const (
   metadata:
     namespace: {{ .Namespace }}
     name: {{ .Name }}
-    labels:
-      ownership: {{ .Ownership }}
   spec:
-    activeDeadlineSeconds: 3600
-    ttlSecondsAfterFinished: 60
-    parallelism: 1
-    completions: 1
+    ttlSecondsAfterFinished: 30
     template:
       spec:
         automountServiceAccountToken: false
         containers:
-        - name:  web-tty
-          image: ghcr.io/cloudtty/cloudshell:v0.3.0
+        - name: web-tty
+          image: {{ .Image }}
           imagePullPolicy: IfNotPresent
           ports:
           - containerPort: 7681
@@ -80,9 +75,9 @@ const (
             periodSeconds: 20
         restartPolicy: Never
         volumes:
-        - configMap:
+        - secret:
             defaultMode: 420
-            name: {{ .Configmap }}
+            secretName: {{ .Secret }}
           name: kubeconfig
 `
 
@@ -90,8 +85,6 @@ const (
 apiVersion: v1
 kind: Service
 metadata:
-  labels:
-    ownership: {{ .Ownership }}
   name: {{ .Name }}
   namespace: {{ .Namespace }}
 spec:

@@ -48,14 +48,14 @@ cloudtty 的入门比较简单，请参照以下步骤进行安装和使用。
 
   ```
   helm repo add daocloud  https://release.daocloud.io/chartrepo/cloudshell
-  helm install cloudtty-operator --version 0.3.0 daocloud/cloudtty
+  helm install cloudtty-operator --version 0.4.0 daocloud/cloudtty
   kubectl wait deployment  cloudtty-operator-controller-manager   --for=condition=Available=True
   ```
 
 2. 创建 CR，启动 cloudtty 的实例，并观察其状态。
 
   ```
-  kubectl apply -f https://raw.githubusercontent.com/cloudtty/cloudtty/v0.3.0/config/samples/local_cluster_v1alpha1_cloudshell.yaml
+  kubectl apply -f https://raw.githubusercontent.com/cloudtty/cloudtty/v0.4.0/config/samples/local_cluster_v1alpha1_cloudshell.yaml
   ```
 
   更多范例，参见`config/samples/`。
@@ -85,7 +85,7 @@ cloudtty 的入门比较简单，请参照以下步骤进行安装和使用。
 * 修改 ![Dockerfile.example](https://github.com/cloudtty/cloudtty/blob/main/docker/Dockerfile.example) 文件。
 
 ```shell
-FROM ghcr.io/cloudtty/cloudshell:v0.3.0
+FROM ghcr.io/cloudtty/cloudshell:v0.4.0
 
 RUN curl -fsSLO https://github.com/karmada-io/karmada/releases/download/v1.2.0/kubectl-karmada-linux-amd64.tgz \
     && tar -zxf kubectl-karmada-linux-amd64.tgz \
@@ -104,10 +104,24 @@ docker build -t <IMAGE> . -f docker/Dockerfile-webtty
 
 ### 使用自定义的 cloudshell 镜像
 
-在安装 cloudtty 时可以设置 `JobTemplate` 镜像参数来运行自己的 cloudshell 的镜像。
+我们有两种方式来设置 cloudshell 的自定义镜像：
+
+1. 直接通过 cloudshell CR 字段 `spec.image` 来设置.
+
+```yaml
+apiVersion: cloudshell.cloudtty.io/v1alpha1
+kind: CloudShell
+metadata:
+  name: cloudshell-sample
+spec:
+  configmapName: "my-kubeconfig"
+  image: ghcr.io/cloudtty/customize_cloudshell:latest
+```
+
+2. 在安装 cloudtty 时可以设置 `JobTemplate` 镜像参数来运行自己的 cloudshell 的镜像。
 
 ```shell
-helm install cloudtty-operator --version 0.3.0 daocloud/cloudtty --set jobTemplate.image.registry=</REGISTRY> --set jobTemplate.image.repository=</REPOSITORY> --set jobTemplate.image.tag=</TAG>
+helm install cloudtty-operator --version 0.4.0 daocloud/cloudtty --set jobTemplate.image.registry=</REGISTRY> --set jobTemplate.image.repository=</REPOSITORY> --set jobTemplate.image.tag=</TAG>
 ```
 
 > 如果你已经安装了 cloudtty，还可以修改 `JobTemplate` 的 configmap 来设置 cloudshell 的镜像。
@@ -133,7 +147,25 @@ cloudtty 会自动挂载到容器中，请确保服务器地址与集群网络�
 
 2. 编辑这个 ConfigMap, 修改 endpoint 的地址，从 IP 改为 servicename，如 `server: https://kubernetes.default.svc.cluster.local:443`
 
-### 进阶 2：修改服务暴露方式
+### 进阶 2：用 cloudtty 访问集群上的 node 主机
+
+cloudshell 的基础镜像中集成 ![kubectl-node-shell](https://github.com/kvaps/kubectl-node-shell) 插件，使用该插件可以通过 `kubectl` 的命令登陆到集群中任意节点上。该命令将会在节点上启动一个具有特权 pod，如果对安全性要求非常高，请谨慎使用此功能。下面是一个使用的实例：
+
+```yaml
+apiVersion: cloudshell.cloudtty.io/v1alpha1
+kind: CloudShell
+metadata:
+  name: cloudshell-node-shell
+spec:
+  configmapName: "<KUBECONFIg>"
+  commandAction: "kubectl node-shell <NODE_NAME>"
+```
+
+更多的示例可以参考 ![kubectl-node-shell](https://github.com/kvaps/kubectl-node-shell).
+
+> 集群中如果已经存在 `PodSecurity` 和 `PSP` 等安全性策略，可能会影响该功能的使用。
+
+### 进阶 3：修改服务暴露方式
 
 cloudtty 提供了以下 4 种服务暴露模式以满足不同的使用场景。
 
@@ -148,6 +180,15 @@ cloudtty 提供了以下 4 种服务暴露模式以满足不同的使用场景�
 
 * `VirtualService (istio)`：在集群中创建 ClusterIP 类型的 Service 资源，并创建 VirtaulService 资源。
   适合在集群中使用 [Istio](https://github.com/istio/istio) 进行流量负载的情况。
+
+### featureGate
+
+* AllowSecretStoreKubeconfig：使用 secret 的方式存储 kubeconfig 文件，如果开启此 featureGate，该字段 `spec.configmapName` 将会失效，使用 `spec.secretRef.name` 来设置 kubeconfig, 目前处于 alpha 阶段，默认是关闭。
+
+#### 如何开启 featrueGate
+
+1. 如果使用 yaml 方式部署 cloudtty，在 operator 的启动参数中添加 `--feature-gates=AllowSecretStoreKubeconfig=true`.
+2. 如果使用 helm 部署的情况，安装指定参数 `--set image.featureGates.AllowSecretStoreKubeconfig=true`.
 
 ### 工作原理
 
@@ -300,3 +341,12 @@ cloudtty 还将提供更多的功能，此处列出一些已经排上日程的�
 4. 需要检查 Pod 的 Running 和 endpoint 的 Ready，才能置 CR 为 Ready
 5. 目前 TTL 只反映到 shell 的 timeout, 没有反映到 Job 的 yaml 里
 6. Job 的创建模板目前是 hardcode 方式，应该提供更灵活的方式修改 Job 的模板
+
+
+## 贡献者
+
+<a href="https://github.com/cloudtty/cloudtty/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=cloudtty/cloudtty" />
+</a>
+
+Made with [contrib.rocks](https://contrib.rocks).
