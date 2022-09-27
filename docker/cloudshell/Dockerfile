@@ -1,9 +1,10 @@
-FROM --platform=${BUILDPLATFORM} node:18.8.0 as builder
+FROM node:18.8.0 as builder
 
 # Build frontend code which added upload/download button
 WORKDIR /app
 COPY html/package.json /app/
 COPY html/yarn.lock /app/
+RUN yarn config set network-timeout 300000
 RUN yarn install
 COPY html/ /app/
 RUN yarn run build
