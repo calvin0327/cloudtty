@@ -5,13 +5,12 @@ go 1.18
 require (
 	github.com/pkg/errors v0.9.1
 	github.com/spf13/cobra v1.4.0
-	github.com/spf13/pflag v1.0.5
 	istio.io/api v0.0.0-20220512212136-561ffec82582
 	istio.io/client-go v1.14.0
-	k8s.io/api v0.25.1
-	k8s.io/apimachinery v0.25.1
+	k8s.io/api v0.25.2
+	k8s.io/apimachinery v0.25.2
 	k8s.io/apiserver v0.25.1
-	k8s.io/client-go v0.25.1
+	k8s.io/client-go v0.25.2
 	k8s.io/code-generator v0.25.1
 	k8s.io/component-base v0.25.1
 	k8s.io/klog/v2 v2.70.1
@@ -61,6 +60,7 @@ require (
 	github.com/prometheus/client_model v0.2.0 // indirect
 	github.com/prometheus/common v0.32.1 // indirect
 	github.com/prometheus/procfs v0.7.3 // indirect
+	github.com/spf13/pflag v1.0.5 // indirect
 	go.etcd.io/etcd/api/v3 v3.5.4 // indirect
 	go.etcd.io/etcd/client/pkg/v3 v3.5.4 // indirect
 	go.etcd.io/etcd/client/v3 v3.5.4 // indirect
