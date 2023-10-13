@@ -81,6 +81,38 @@ const (
           name: kubeconfig
 `
 
+	PodTmplV1 = `
+apiVersion: v1
+kind: Pod
+metadata:
+  namespace: {{ .Namespace }}
+  name: {{ .Name }}
+spec:
+  containers:
+  - name: web-tty
+    image: "release-ci.daocloud.io/cloudtty/cloudshell:v1.99"
+    imagePullPolicy: IfNotPresent
+    command:
+    - bash
+    - "-c"
+    - |
+      ttyd sh
+    ports:
+    - containerPort: 7681
+      name: tty-ui
+      protocol: TCP
+    readinessProbe:
+      tcpSocket:
+        port: 7681
+      periodSeconds: 1
+      failureThreshold: 15
+    livenessProbe:
+      tcpSocket:
+        port: 7681
+      periodSeconds: 20
+  restartPolicy: Never
+`
+
 	ServiceTmplV1 = `
 apiVersion: v1
 kind: Service

@@ -7,7 +7,9 @@ const (
 	DefaultServicePort          = 7681
 	DefauletWebttyContainerName = "web-tty"
 
-	CloudshellOwnerLabelKey = "cloudshell.cloudtty.io/owner-name"
+	CloudshellOwnerLabelKey    = "cloudshell.cloudtty.io/owner-name"
+	CloudshellWorkerLabelKey   = "cloudshell.cloudtty.io/worker-name"
+	CloudshellPodLabelStateKey = "cloudshell.cloudtty.io/worker-state"
 
-	JobTemplatePath = "/etc/cloudtty/job-temp.yaml"
+	PodTemplatePath = "/etc/cloudtty/pod-temp.yaml"
 )
