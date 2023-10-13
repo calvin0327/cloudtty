@@ -24,8 +24,8 @@ func (o *Options) Validate() field.ErrorList {
 	errs := field.ErrorList{}
 	newPath := field.NewPath("Options")
 
-	if o.SecurePort < 0 || o.SecurePort > 65535 {
-		errs = append(errs, field.Invalid(newPath.Child("SecurePort"), o.SecurePort, "must be between 0 and 65535 inclusive"))
+	if o.WorkerNumber <= 0 {
+		errs = append(errs, field.Invalid(newPath.Child("WorkerNumber"), o.WorkerNumber, "worker-number must be greater than 0"))
 	}
 
 	return errs
