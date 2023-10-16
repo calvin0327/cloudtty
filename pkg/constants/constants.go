@@ -10,6 +10,7 @@ const (
 	CloudshellOwnerLabelKey    = "cloudshell.cloudtty.io/owner-name"
 	CloudshellWorkerLabelKey   = "cloudshell.cloudtty.io/worker-name"
 	CloudshellPodLabelStateKey = "cloudshell.cloudtty.io/worker-state"
+	CloudshellPodLabelKey      = "cloudshell.cloudtty.io/pod-name"
 
 	PodTemplatePath = "/etc/cloudtty/pod-temp.yaml"
 )

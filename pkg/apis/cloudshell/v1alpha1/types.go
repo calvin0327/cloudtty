@@ -32,6 +32,7 @@ const (
 	ExposureVirtualService   ExposureMode = "VirtualService"
 
 	PhaseCreatedJob   = "CreatedJob"
+	PhasePodReady     = "PodReady"
 	PhaseCreatedRoute = "CreatedRouteRule"
 	PhaseReady        = "Ready"
 	PhaseCompleted    = "Complete"
