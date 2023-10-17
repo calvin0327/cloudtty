@@ -5,10 +5,12 @@ import (
 	rest "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/record"
 	componentbaseconfig "k8s.io/component-base/config"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 type Config struct {
 	Client        *clientset.Clientset
+	RuntimeClient client.Client
 	Kubeconfig    *rest.Config
 	EventRecorder record.EventRecorder
 	WorkerNumber  int

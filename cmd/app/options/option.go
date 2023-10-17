@@ -16,6 +16,7 @@ limitations under the License.
 package options
 
 import (
+	"github.com/cloudtty/cloudtty/pkg/utils/gclient"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientset "k8s.io/client-go/kubernetes"
@@ -31,6 +32,7 @@ import (
 	componentbaseconfigv1alpha1 "k8s.io/component-base/config/v1alpha1"
 	"k8s.io/component-base/logs"
 	logsapi "k8s.io/component-base/logs/api/v1"
+	runtimeclient "sigs.k8s.io/controller-runtime/pkg/client"
 	clientconfig "sigs.k8s.io/controller-runtime/pkg/client/config"
 
 	"github.com/cloudtty/cloudtty/cmd/app/config"
@@ -132,8 +134,13 @@ func (o *Options) Config() (*config.Config, error) {
 	eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: client.CoreV1().Events("")})
 	eventRecorder := eventBroadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: CloudShellControllerManagerUserAgent})
 
+	runtimeClient, err := runtimeclient.New(kubeconfig, runtimeclient.Options{
+		Scheme: gclient.NewSchema(),
+	})
+
 	return &config.Config{
 		Client:        client,
+		RuntimeClient: runtimeClient,
 		Kubeconfig:    kubeconfig,
 		EventRecorder: eventRecorder,
 		WorkerNumber:  o.WorkerNumber,

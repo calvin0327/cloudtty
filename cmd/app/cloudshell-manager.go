@@ -3,6 +3,9 @@ package app
 import (
 	"context"
 	"fmt"
+	"github.com/cloudtty/cloudtty/pkg/controllers"
+	"github.com/cloudtty/cloudtty/pkg/generated/clientset/versioned"
+	"github.com/cloudtty/cloudtty/pkg/generated/informers/externalversions"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -94,7 +97,7 @@ func Run(ctx context.Context, config *config.Config) error {
 		return err
 	}
 
-	// add a uniquifier so that two processes on the same host don't accidentally both become active
+	// add an uniquifier so that two processes on the same host don't accidentally both become active
 	id += "_" + string(uuid.NewUUID())
 
 	rl, err := resourcelock.NewFromKubeconfig(
@@ -141,9 +144,21 @@ func StartControllers(c *config.Config, stopCh <-chan struct{}) error {
 	podInformer := factory.Core().V1().Pods()
 
 	wk := workpool.New(c.LeaderElection.ResourceNamespace, c.Client, 3, 10, false, podInformer)
+
+	csClient, err := versioned.NewForConfig(c.Kubeconfig)
+	if err != nil {
+		return err
+	}
+
+	informerFactory := externalversions.NewSharedInformerFactory(csClient, 0)
+	informer := informerFactory.Cloudshell().V1alpha1().CloudShells()
+	controller := controllers.NewController(c.RuntimeClient, informer, podInformer)
+
 	factory.Start(stopCh)
+	informerFactory.Start(stopCh)
 
 	go wk.Run(1, stopCh)
+	go controller.Run(3, stopCh)
 
 	<-stopCh
 	return nil

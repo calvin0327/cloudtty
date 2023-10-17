@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"github.com/cloudtty/cloudtty/pkg/generated/listers/cloudshell/v1alpha1"
 	"github.com/cloudtty/cloudtty/pkg/helper"
+	"github.com/cloudtty/cloudtty/pkg/utils/gclient"
 	"github.com/pkg/errors"
 	networkingv1beta1 "istio.io/api/networking/v1beta1"
 	istionetworkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
@@ -34,8 +35,11 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/cli-runtime/pkg/genericiooptions"
+	informercorev1 "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
+	listerscorev1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/retry"
@@ -69,6 +73,7 @@ const (
 	// MaxCloudShellBackOff is the max backoff period. Exported for tests.
 	MaxCloudShellBackOff = 5 * time.Second
 	KubeConfigPath       = "/root/.kube/config"
+	TTYdScriptPath       = "/root/startup.sh"
 )
 
 // CloudShellController reconciles a CloudShell object
@@ -77,19 +82,22 @@ type CloudShellController struct {
 	Scheme     *runtime.Scheme
 	workerPool workpool.WorkerPool
 
-	queue    workqueue.RateLimitingInterface
-	informer cache.SharedIndexInformer
-	lister   v1alpha1.CloudShellLister
+	queue     workqueue.RateLimitingInterface
+	informer  cache.SharedIndexInformer
+	lister    v1alpha1.CloudShellLister
+	podLister listerscorev1.PodLister
 }
 
-func NewController(client client.Client, csInformer cloudshellinformers.CloudShellInformer) *CloudShellController {
+func NewController(client client.Client, csInformer cloudshellinformers.CloudShellInformer, podInformer informercorev1.PodInformer) *CloudShellController {
 	controller := &CloudShellController{
 		Client: client,
+		Scheme: gclient.NewSchema(),
 		queue: workqueue.NewRateLimitingQueue(
 			workqueue.NewItemExponentialFailureRateLimiter(DefaultCloudShellBackOff, MaxCloudShellBackOff),
 		),
-		informer: csInformer.Informer(),
-		lister:   csInformer.Lister(),
+		informer:  csInformer.Informer(),
+		lister:    csInformer.Lister(),
+		podLister: podInformer.Lister(),
 	}
 
 	//csInformer.Informer().AddEventHandler(
@@ -110,7 +118,7 @@ func (c *CloudShellController) processNextItem() bool {
 	}
 	defer c.queue.Done(key)
 
-	// 调用业务方法，实现具体的业务需求
+	// main reconcile logic
 	err := c.syncHandler(key.(string))
 	if err == nil {
 		return true
@@ -157,7 +165,6 @@ func (c *CloudShellController) Run(workers int, stopCh <-chan struct{}) {
 	wg.Wait()
 }
 
-// Reconcile --> syncHandler
 func (c *CloudShellController) syncHandler(key string) error {
 	klog.V(4).Infof("Reconciling cloudshell %s", key)
 	startTime := time.Now()
@@ -214,8 +221,8 @@ func (c *CloudShellController) syncCloudShell(ctx context.Context, cloudshell *c
 		return nil
 	}
 
-	// 1. GetPodForCloudShell, borrow pod from workerpool if not exist
-	// 2. StartPodForCloudShell (1) copy kubeconfig (2) start ttyd
+	// 1. GetPodForCloudShell, borrow pod from workerPool if not exist
+	// 2. StartPodForCloudShell (1) copy kubeConfig (2) start ttyd
 	if !ok {
 		pod, err = c.workerPool.Borrow()
 		if err != nil {
@@ -227,6 +234,7 @@ func (c *CloudShellController) syncCloudShell(ctx context.Context, cloudshell *c
 			return err
 		}
 
+		cloudshell.SetLabels(map[string]string{constants.CloudshellPodLabelKey: pod.Name})
 		if err = c.UpdateCloudshellStatus(ctx, cloudshell, cloudshellv1alpha1.PhasePodReady); err != nil {
 			return err
 		}
@@ -246,6 +254,7 @@ func (c *CloudShellController) syncCloudShell(ctx context.Context, cloudshell *c
 	return nil
 }
 
+// StartPodForCloudShell copy kubeConfig and start ttyd
 func (c *CloudShellController) StartPodForCloudShell(ctx context.Context, cloudshell *cloudshellv1alpha1.CloudShell) error {
 	// if secretRef is empty, use the Incluster rest config to generate kubeconfig and restore a secret.
 	// the kubeconfig only work on current cluster.
@@ -296,7 +305,7 @@ func (c *CloudShellController) StartPodForCloudShell(ctx context.Context, clouds
 func (c *CloudShellController) StartTTYd(ctx context.Context, cloudshell *cloudshellv1alpha1.CloudShell, kubeConfigByte []byte) error {
 	clientConfig, err := clientcmd.NewClientConfigFromBytes(kubeConfigByte)
 	if err != nil {
-		klog.V(4).ErrorS(err, "unable to create client config from kubeConfig bytes", "cluster", cluster.Name)
+		klog.V(4).ErrorS(err, "unable to create client config from kubeConfig bytes", "cloudshell", cloudshell.Name)
 		return err
 	}
 
@@ -308,31 +317,30 @@ func (c *CloudShellController) StartTTYd(ctx context.Context, cloudshell *clouds
 	clusterConfig.NegotiatedSerializer = scheme.Codecs.WithoutConversion()
 	clusterConfig.APIPath = "/api"
 
-	client, err := kubernetes.NewForConfig(clusterConfig)
+	clusterClient, err := kubernetes.NewForConfig(clusterConfig)
 	if err != nil {
 		panic(err)
 	}
 
-	options := &exec.ExecOptions{}
-	options.StreamOptions = exec.StreamOptions{
-		IOStreams: genericiooptions.IOStreams{
-			In:     bytes.NewBuffer([]byte{}),
-			Out:    bytes.NewBuffer([]byte{}),
-			ErrOut: bytes.NewBuffer([]byte{}),
+	// ttyd args，passed as shell parameter
+	// case: cmdArr := []string{"/root/startup.sh", "100", "true", "false", "kubectl get po -n default"}
+	cmdArr := []string{TTYdScriptPath, string(cloudshell.Spec.Ttl), fmt.Sprint(cloudshell.Spec.Once), fmt.Sprint(cloudshell.Spec.UrlArg), cloudshell.Spec.CommandAction}
+	options := &exec.ExecOptions{
+		Command:   cmdArr,
+		Executor:  &exec.DefaultRemoteExecutor{},
+		Config:    clusterConfig,
+		PodClient: clusterClient.CoreV1(),
+		StreamOptions: exec.StreamOptions{
+			IOStreams: genericiooptions.IOStreams{
+				In:     bytes.NewBuffer([]byte{}),
+				Out:    bytes.NewBuffer([]byte{}),
+				ErrOut: bytes.NewBuffer([]byte{}),
+			},
+			Stdin:     false,
+			Namespace: cloudshell.Namespace,
+			PodName:   cloudshell.Labels[constants.CloudshellPodLabelKey],
 		},
-		Stdin:     false,
-		Namespace: "kpanda-system",
-		PodName:   cloudshell.Labels[constants.CloudshellPodLabelKey],
 	}
-	// echoCommand := fmt.Sprintf("echo '%s' > /root/config", configRaw)
-
-	// todo 组装ttyd的参数，写在脚本or设置环境变量
-	cmdArr := []string{"/root/startup.sh", "kubectl logs -n default dd-2048-dao-2048-6c5dcb5787-kbm4b"}
-
-	options.Command = cmdArr
-	options.Executor = &exec.DefaultRemoteExecutor{}
-	options.Config = clusterConfig
-	options.PodClient = client.CoreV1()
 
 	if err := options.Validate(); err != nil {
 		panic(err)
@@ -421,7 +429,7 @@ func (c *CloudShellController) CreateRouteRule(ctx context.Context, cloudshell *
 		}
 		accessURL = SetRouteRulePath(cloudshell)
 	case cloudshellv1alpha1.ExposureVirtualService:
-		if err := c.CreateVitualServiceForCloudshell(ctx, service, cloudshell); err != nil {
+		if err := c.CreateVirtualServiceForCloudshell(ctx, service, cloudshell); err != nil {
 			klog.ErrorS(err, "failed create virtualservice for cloudshell", "cloudshell", klog.KObj(cloudshell))
 			return err
 		}
@@ -430,23 +438,6 @@ func (c *CloudShellController) CreateRouteRule(ctx context.Context, cloudshell *
 
 	cloudshell.Status.AccessURL = accessURL
 	return c.UpdateCloudshellStatus(ctx, cloudshell, cloudshellv1alpha1.PhaseCreatedRoute)
-}
-
-// GetJobForCloudshell to find job of cloudshell according to labels ""cloudshell.cloudtty.io/owner-name"".
-func (c *CloudShellController) GetJobForCloudshell(ctx context.Context, namespace string, cloudshell *cloudshellv1alpha1.CloudShell) (*batchv1.Job, error) {
-	var jobs batchv1.JobList
-	if err := c.List(ctx, &jobs, client.InNamespace(namespace), client.MatchingLabels{constants.CloudshellOwnerLabelKey: cloudshell.Name}); err != nil {
-		return nil, err
-	}
-	if len(jobs.Items) > 1 {
-		klog.InfoS("found multiple cloudshell jobs", "cloudshell", klog.KObj(cloudshell))
-		return nil, errors.New("found multiple cloudshell jobs")
-	}
-	if len(jobs.Items) == 0 {
-		return nil, apierrors.NewNotFound(batchv1.Resource("jobs"), fmt.Sprintf("cloudshell-%s", cloudshell.Name))
-	}
-
-	return &jobs.Items[0], nil
 }
 
 // GetPodForCloudshell to find pod of cloudshell according to labels ""cloudshell.cloudtty.io/owner-name"".
@@ -550,7 +541,7 @@ func (c *CloudShellController) CreateIngressForCloudshell(ctx context.Context, s
 		return err
 	}
 
-	// if there is not ingress in the cluster, create the base ingress.
+	// if there is no ingress in the cluster, create the base ingress.
 	if ingress != nil && apierrors.IsNotFound(err) {
 		var ingressClassName string
 		if cloudshell.Spec.IngressConfig != nil && len(cloudshell.Spec.IngressConfig.IngressClassName) > 0 {
@@ -603,9 +594,9 @@ func (c *CloudShellController) CreateIngressForCloudshell(ctx context.Context, s
 	return c.Update(ctx, ingress)
 }
 
-// CreateVitualServiceForCloudshell create a virtualService resource in the cluster. if there
+// CreateVirtualServiceForCloudshell create a virtualService resource in the cluster. if there
 // is no istio server be deployed in the cluster. will not create the resource.
-func (c *CloudShellController) CreateVitualServiceForCloudshell(ctx context.Context, service *corev1.Service, cloudshell *cloudshellv1alpha1.CloudShell) error {
+func (c *CloudShellController) CreateVirtualServiceForCloudshell(ctx context.Context, service *corev1.Service, cloudshell *cloudshellv1alpha1.CloudShell) error {
 	config := cloudshell.Spec.VirtualServiceConfig
 	if config == nil {
 		return errors.New("unable create virtualservice, missing configuration options")
@@ -825,7 +816,7 @@ func (c *CloudShellController) isRunning(ctx context.Context, job *batchv1.Job) 
 	return false, errors.Errorf("no pod of job %s is running", job.Name)
 }
 
-// GenerateKubeconfigByInCluster load serviceaccount info under
+// GenerateKubeconfigInCluster load serviceaccount info under
 // "/var/run/secrets/kubernetes.io/serviceaccount" and generate kubeconfig str.
 func GenerateKubeconfigInCluster() ([]byte, error) {
 	const (
