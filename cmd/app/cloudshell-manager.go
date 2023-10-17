@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"time"
 
 	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/util/runtime"
@@ -15,7 +14,6 @@ import (
 	cliflag "k8s.io/component-base/cli/flag"
 	"k8s.io/component-base/cli/globalflag"
 	"k8s.io/component-base/logs"
-	logsapi "k8s.io/component-base/logs/api/v1"
 	logsv1 "k8s.io/component-base/logs/api/v1"
 	"k8s.io/component-base/term"
 	"k8s.io/component-base/version/verflag"
@@ -44,7 +42,7 @@ func NewCloudShellManagerCommand(ctx context.Context) *cobra.Command {
 
 			// Activate logging as soon as possible, after that
 			// show flags with the final logging configuration.
-			if err := logsapi.ValidateAndApply(opts.Logs, feature.FeatureGate); err != nil {
+			if err := logsv1.ValidateAndApply(opts.Logs, feature.FeatureGate); err != nil {
 				fmt.Fprintf(os.Stderr, "%v\n", err)
 				os.Exit(1)
 			}
@@ -136,9 +134,6 @@ func Run(ctx context.Context, config *config.Config) error {
 
 func StartControllers(c *config.Config, stopCh <-chan struct{}) error {
 	options := []informers.SharedInformerOption{
-		// informers.WithTweakListOptions(func(listOptions *metav1.ListOptions) {
-		// 	listOptions.LabelSelector = labels.Set{constants.CloudshellPodLabelStateKey: "idle"}.String()
-		// }),
 		informers.WithNamespace(c.LeaderElection.ResourceNamespace),
 	}
 
@@ -147,21 +142,9 @@ func StartControllers(c *config.Config, stopCh <-chan struct{}) error {
 
 	wk := workpool.New(c.LeaderElection.ResourceNamespace, c.Client, 3, 10, false, podInformer)
 	factory.Start(stopCh)
-	go wk.Run(1, stopCh)
 
-	go test(wk)
+	go wk.Run(1, stopCh)
 
 	<-stopCh
 	return nil
-}
-
-func test(wk *workpool.WorkerPool) {
-	pod, _ := wk.Borrow()
-	pod1, _ := wk.Borrow()
-	pod2, _ := wk.Borrow()
-	time.Sleep(30 * time.Second)
-
-	wk.Back(pod)
-	wk.Back(pod1)
-	wk.Back(pod2)
 }
