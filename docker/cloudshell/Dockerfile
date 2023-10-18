@@ -33,4 +33,8 @@ RUN ttydArch="$(uname -m)" && echo "Building arch of $ttydArch.." \
   
 RUN mkdir /usr/lib/ttyd
 COPY --from=builder /app/dist/inline.html /usr/lib/ttyd/index.html
+
 WORKDIR /root
+RUN mkdir /root/.kube
+COPY ./startup.sh /root/
+RUN CHMOD 777 startup.sh

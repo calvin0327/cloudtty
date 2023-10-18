@@ -303,51 +303,16 @@ func (c *CloudShellController) StartPodForCloudShell(ctx context.Context, clouds
 }
 
 func (c *CloudShellController) StartTTYd(ctx context.Context, cloudshell *cloudshellv1alpha1.CloudShell, kubeConfigByte []byte) error {
-	clientConfig, err := clientcmd.NewClientConfigFromBytes(kubeConfigByte)
-	if err != nil {
-		klog.V(4).ErrorS(err, "unable to create client config from kubeConfig bytes", "cloudshell", cloudshell.Name)
+	// copy kubeConfig
+	echoCommand := fmt.Sprintf("echo '%s' > %s", kubeConfigByte, KubeConfigPath)
+	if err := runCommand(cloudshell, []string{"bash", "-c", echoCommand}, kubeConfigByte); err != nil {
 		return err
 	}
-
-	clusterConfig, err := clientConfig.ClientConfig()
-	if err != nil {
-		panic(err)
-	}
-	clusterConfig.GroupVersion = &corev1.SchemeGroupVersion
-	clusterConfig.NegotiatedSerializer = scheme.Codecs.WithoutConversion()
-	clusterConfig.APIPath = "/api"
-
-	clusterClient, err := kubernetes.NewForConfig(clusterConfig)
-	if err != nil {
-		panic(err)
-	}
-
-	// ttyd args，passed as shell parameter
-	// case: cmdArr := []string{"/root/startup.sh", "100", "true", "false", "kubectl get po -n default"}
-	cmdArr := []string{TTYdScriptPath, string(cloudshell.Spec.Ttl), fmt.Sprint(cloudshell.Spec.Once), fmt.Sprint(cloudshell.Spec.UrlArg), cloudshell.Spec.CommandAction}
-	options := &exec.ExecOptions{
-		Command:   cmdArr,
-		Executor:  &exec.DefaultRemoteExecutor{},
-		Config:    clusterConfig,
-		PodClient: clusterClient.CoreV1(),
-		StreamOptions: exec.StreamOptions{
-			IOStreams: genericiooptions.IOStreams{
-				In:     bytes.NewBuffer([]byte{}),
-				Out:    bytes.NewBuffer([]byte{}),
-				ErrOut: bytes.NewBuffer([]byte{}),
-			},
-			Stdin:     false,
-			Namespace: cloudshell.Namespace,
-			PodName:   cloudshell.Labels[constants.CloudshellPodLabelKey],
-		},
-	}
-
-	if err := options.Validate(); err != nil {
-		panic(err)
-	}
-
-	if err := options.Run(); err != nil {
-		fmt.Println(err)
+	// start ttyd, ttyd args passed as shell parameter
+	// case: ttydCommand := []string{"/root/startup.sh", "100", "true", "false", "kubectl get po -n default"}
+	ttydCommand := []string{TTYdScriptPath, string(cloudshell.Spec.Ttl), fmt.Sprint(cloudshell.Spec.Once), fmt.Sprint(cloudshell.Spec.UrlArg), cloudshell.Spec.CommandAction}
+	if err := runCommand(cloudshell, ttydCommand, kubeConfigByte); err != nil {
+		return err
 	}
 
 	return nil
@@ -846,4 +811,52 @@ func GenerateKubeconfigInCluster() ([]byte, error) {
 func hasBindPod(cloudshell *cloudshellv1alpha1.CloudShell) (string, bool) {
 	podName, ok := cloudshell.Labels[constants.CloudshellPodLabelKey]
 	return podName, ok
+}
+
+func runCommand(cloudshell *cloudshellv1alpha1.CloudShell, command []string, kubeConfigByte []byte) error {
+	clientConfig, err := clientcmd.NewClientConfigFromBytes(kubeConfigByte)
+	if err != nil {
+		klog.V(4).ErrorS(err, "unable to create client config from kubeConfig bytes", "cloudshell", cloudshell.Name)
+		return err
+	}
+
+	clusterConfig, err := clientConfig.ClientConfig()
+	if err != nil {
+		return err
+	}
+	clusterConfig.GroupVersion = &corev1.SchemeGroupVersion
+	clusterConfig.NegotiatedSerializer = scheme.Codecs.WithoutConversion()
+	clusterConfig.APIPath = "/api"
+
+	clusterClient, err := kubernetes.NewForConfig(clusterConfig)
+	if err != nil {
+		panic(err)
+	}
+
+	options := &exec.ExecOptions{
+		Command:   command,
+		Executor:  &exec.DefaultRemoteExecutor{},
+		Config:    clusterConfig,
+		PodClient: clusterClient.CoreV1(),
+		StreamOptions: exec.StreamOptions{
+			IOStreams: genericiooptions.IOStreams{
+				In:     bytes.NewBuffer([]byte{}),
+				Out:    bytes.NewBuffer([]byte{}),
+				ErrOut: bytes.NewBuffer([]byte{}),
+			},
+			Stdin:     false,
+			Namespace: cloudshell.Namespace,
+			PodName:   cloudshell.Labels[constants.CloudshellPodLabelKey],
+		},
+	}
+
+	if err := options.Validate(); err != nil {
+		return err
+	}
+
+	if err := options.Run(); err != nil {
+		klog.ErrorS(err, "failed to run command")
+		return err
+	}
+	return nil
 }
