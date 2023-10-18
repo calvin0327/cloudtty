@@ -31,22 +31,6 @@ func NewPodTemplateValue(cloudShell *cloudshellv1alpha1.CloudShell) PodTemplateV
 	}
 }
 
-type ServiceTemplateValue struct {
-	Name      string
-	Namespace string
-	JobName   string
-	Type      string
-}
-
-func NewServiceTemplateValue(cloudShell *cloudshellv1alpha1.CloudShell, serviceType cloudshellv1alpha1.ExposureMode) ServiceTemplateValue {
-	return ServiceTemplateValue{
-		Name:      fmt.Sprintf("cloudshell-%s", cloudShell.Name),
-		Namespace: cloudShell.Namespace,
-		JobName:   fmt.Sprintf("cloudshell-%s", cloudShell.Name),
-		Type:      string(serviceType),
-	}
-}
-
 type IngressTemplateValue struct {
 	Name             string
 	Namespace        string

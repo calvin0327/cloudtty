@@ -343,7 +343,7 @@ func (w *WorkerPool) createWorker() error {
 	}
 	pod := obj.(*corev1.Pod)
 
-	pod.SetLabels(map[string]string{constants.CloudshellIdleWorkerKey: ""})
+	pod.SetLabels(map[string]string{constants.CloudshellIdleWorkerKey: "", "worker-name": pod.Name})
 	controllerutil.AddFinalizer(pod, ControllerFinalizer)
 
 	_, err = w.clienset.CoreV1().Pods(w.namespace).Create(context.TODO(), pod, metav1.CreateOptions{})
