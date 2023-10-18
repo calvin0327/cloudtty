@@ -3,10 +3,10 @@ package app
 import (
 	"context"
 	"fmt"
-	"github.com/cloudtty/cloudtty/pkg/controllers"
-	"github.com/cloudtty/cloudtty/pkg/generated/clientset/versioned"
-	"github.com/cloudtty/cloudtty/pkg/generated/informers/externalversions"
 	"os"
+
+	"github.com/cloudtty/cloudtty/pkg/controllers"
+	"github.com/cloudtty/cloudtty/pkg/generated/informers/externalversions"
 
 	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/util/runtime"
@@ -26,7 +26,7 @@ import (
 	"github.com/cloudtty/cloudtty/cmd/app/options"
 	"github.com/cloudtty/cloudtty/pkg/utils/feature"
 	"github.com/cloudtty/cloudtty/pkg/version"
-	workpool "github.com/cloudtty/cloudtty/pkg/workerpool"
+	worerkpool "github.com/cloudtty/cloudtty/pkg/workerpool"
 )
 
 func init() {
@@ -140,25 +140,19 @@ func StartControllers(c *config.Config, stopCh <-chan struct{}) error {
 		informers.WithNamespace(c.LeaderElection.ResourceNamespace),
 	}
 
-	factory := informers.NewSharedInformerFactoryWithOptions(c.Client, 0, options...)
+	factory := informers.NewSharedInformerFactoryWithOptions(c.KubeClient, 0, options...)
 	podInformer := factory.Core().V1().Pods()
+	pool := worerkpool.New(c.LeaderElection.ResourceNamespace, c.KubeClient, 3, 10, false, podInformer)
 
-	wk := workpool.New(c.LeaderElection.ResourceNamespace, c.Client, 3, 10, false, podInformer)
-
-	csClient, err := versioned.NewForConfig(c.Kubeconfig)
-	if err != nil {
-		return err
-	}
-
-	informerFactory := externalversions.NewSharedInformerFactory(csClient, 0)
+	informerFactory := externalversions.NewSharedInformerFactory(c.CloudShellClient, 0)
 	informer := informerFactory.Cloudshell().V1alpha1().CloudShells()
-	controller := controllers.NewController(c.RuntimeClient, informer, podInformer)
+	controller := controllers.NewController(c.Client, pool, informer, podInformer)
 
 	factory.Start(stopCh)
 	informerFactory.Start(stopCh)
 
-	go wk.Run(1, stopCh)
-	go controller.Run(3, stopCh)
+	go pool.Run(1, stopCh)
+	go controller.Run(1, stopCh)
 
 	<-stopCh
 	return nil

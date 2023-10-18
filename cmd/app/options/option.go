@@ -16,6 +16,7 @@ limitations under the License.
 package options
 
 import (
+	"github.com/cloudtty/cloudtty/pkg/generated/clientset/versioned"
 	"github.com/cloudtty/cloudtty/pkg/utils/gclient"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -137,13 +138,22 @@ func (o *Options) Config() (*config.Config, error) {
 	runtimeClient, err := runtimeclient.New(kubeconfig, runtimeclient.Options{
 		Scheme: gclient.NewSchema(),
 	})
+	if err != nil {
+		return nil, err
+	}
+
+	csClient, err := versioned.NewForConfig(kubeconfig)
+	if err != nil {
+		return nil, err
+	}
 
 	return &config.Config{
-		Client:        client,
-		RuntimeClient: runtimeClient,
-		Kubeconfig:    kubeconfig,
-		EventRecorder: eventRecorder,
-		WorkerNumber:  o.WorkerNumber,
+		KubeClient:       client,
+		CloudShellClient: csClient,
+		Client:           runtimeClient,
+		Kubeconfig:       kubeconfig,
+		EventRecorder:    eventRecorder,
+		WorkerNumber:     o.WorkerNumber,
 
 		LeaderElection: o.LeaderElection,
 	}, nil

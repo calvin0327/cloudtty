@@ -45,8 +45,5 @@ func IsCloudshellFinished(cloudsehll *cloudshellv1alpha1.CloudShell) bool {
 }
 
 func IsCloudShellPodReady(cloudsehll *cloudshellv1alpha1.CloudShell) bool {
-	if cloudsehll.Status.Phase == cloudshellv1alpha1.PhasePodReady {
-		return true
-	}
-	return false
+	return cloudsehll.Status.Phase == cloudshellv1alpha1.PhasePodReady
 }

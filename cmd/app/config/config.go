@@ -6,14 +6,17 @@ import (
 	"k8s.io/client-go/tools/record"
 	componentbaseconfig "k8s.io/component-base/config"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/cloudtty/cloudtty/pkg/generated/clientset/versioned"
 )
 
 type Config struct {
-	Client        *clientset.Clientset
-	RuntimeClient client.Client
-	Kubeconfig    *rest.Config
-	EventRecorder record.EventRecorder
-	WorkerNumber  int
+	KubeClient       *clientset.Clientset
+	CloudShellClient *versioned.Clientset
+	Client           client.Client
+	Kubeconfig       *rest.Config
+	EventRecorder    record.EventRecorder
+	WorkerNumber     int
 
 	LeaderElection componentbaseconfig.LeaderElectionConfiguration
 }

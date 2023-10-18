@@ -1,32 +1,20 @@
-/*
-Copyright 2022.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package controllers
 
 import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
+	"strings"
+	"sync"
+	"time"
+
 	"github.com/cloudtty/cloudtty/pkg/generated/listers/cloudshell/v1alpha1"
 	"github.com/cloudtty/cloudtty/pkg/helper"
 	"github.com/cloudtty/cloudtty/pkg/utils/gclient"
 	"github.com/pkg/errors"
 	networkingv1beta1 "istio.io/api/networking/v1beta1"
 	istionetworkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
-	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -46,19 +34,15 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 	"k8s.io/kubectl/pkg/cmd/exec"
-	"os"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlutil "sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	"strings"
-	"sync"
-	"time"
 
 	cloudshellv1alpha1 "github.com/cloudtty/cloudtty/pkg/apis/cloudshell/v1alpha1"
 	"github.com/cloudtty/cloudtty/pkg/constants"
 	cloudshellinformers "github.com/cloudtty/cloudtty/pkg/generated/informers/externalversions/cloudshell/v1alpha1"
 	"github.com/cloudtty/cloudtty/pkg/manifests"
 	util "github.com/cloudtty/cloudtty/pkg/utils"
-	"github.com/cloudtty/cloudtty/pkg/workerpool"
+	worerkpool "github.com/cloudtty/cloudtty/pkg/workerpool"
 )
 
 const (
@@ -80,7 +64,7 @@ const (
 type CloudShellController struct {
 	client.Client
 	Scheme     *runtime.Scheme
-	workerPool workpool.WorkerPool
+	workerPool *worerkpool.WorkerPool
 
 	queue     workqueue.RateLimitingInterface
 	informer  cache.SharedIndexInformer
@@ -88,27 +72,43 @@ type CloudShellController struct {
 	podLister listerscorev1.PodLister
 }
 
-func NewController(client client.Client, csInformer cloudshellinformers.CloudShellInformer, podInformer informercorev1.PodInformer) *CloudShellController {
+func NewController(client client.Client, wp *worerkpool.WorkerPool, csInformer cloudshellinformers.CloudShellInformer, podInformer informercorev1.PodInformer) *CloudShellController {
 	controller := &CloudShellController{
-		Client: client,
-		Scheme: gclient.NewSchema(),
+		Client:     client,
+		Scheme:     gclient.NewSchema(),
+		workerPool: wp,
 		queue: workqueue.NewRateLimitingQueue(
 			workqueue.NewItemExponentialFailureRateLimiter(DefaultCloudShellBackOff, MaxCloudShellBackOff),
 		),
+
 		informer:  csInformer.Informer(),
 		lister:    csInformer.Lister(),
 		podLister: podInformer.Lister(),
 	}
 
-	//csInformer.Informer().AddEventHandler(
-	//	cache.ResourceEventHandlerFuncs{
-	//		AddFunc:    controller.AddEvent,
-	//		UpdateFunc: controller.UpdateEventfunc,
-	//		DeleteFunc: controller.DeleteEvent,
-	//	},
-	//)
+	if _, err := csInformer.Informer().AddEventHandler(
+		cache.ResourceEventHandlerFuncs{
+			AddFunc: func(obj interface{}) {
+				controller.enqueue(obj)
+			},
+			UpdateFunc: func(_, newObj interface{}) {
+				controller.enqueue(newObj)
+			},
+			DeleteFunc: func(obj interface{}) {
+				controller.enqueue(obj)
+			},
+		},
+	); err != nil {
+		klog.ErrorS(err, "error when adding event handler to informer")
+	}
 
 	return controller
+}
+
+func (c *CloudShellController) enqueue(obj interface{}) {
+	cloudshell := obj.(*cloudshellv1alpha1.CloudShell)
+	key, _ := cache.MetaNamespaceKeyFunc(cloudshell)
+	c.queue.Add(key)
 }
 
 func (c *CloudShellController) processNextItem() bool {
@@ -181,6 +181,7 @@ func (c *CloudShellController) syncHandler(key string) error {
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			klog.Errorf("Fetching object with key %s from store failed with %v", key, err)
+			return nil
 		}
 		return err
 	}
@@ -200,18 +201,45 @@ func (c *CloudShellController) syncHandler(key string) error {
 
 func (c *CloudShellController) syncCloudShell(ctx context.Context, cloudshell *cloudshellv1alpha1.CloudShell) error {
 	var err error
-	pod := &corev1.Pod{}
-	podName, ok := hasBindPod(cloudshell)
-	if ok {
-		if err = c.Get(context.TODO(), client.ObjectKey{Namespace: cloudshell.Namespace, Name: podName}, pod); err != nil {
+	var pod *corev1.Pod
+	if podName, exist := hasBindPod(cloudshell); exist {
+		pod, err = c.podLister.Pods(cloudshell.Namespace).Get(podName)
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+
+				// TODO: Borrow
+			}
 			return err
 		}
-	}
-	if IsCloudshellFinished(cloudshell) {
-		if ok {
-			// todo restore the pod, cleanup the kubeConfig
-			_ = c.workerPool.Back(pod)
+	} else {
+		// 1. GetPodForCloudShell, borrow pod from workerPool if not exist
+		// 2. StartPodForCloudShell (1) copy kubeConfig (2) start ttyd
+		pod, err = c.workerPool.Borrow()
+		if pod == nil || err != nil {
+			klog.ErrorS(err, "Failed to get pod", "cloudshell", klog.KObj(cloudshell))
+			return err
 		}
+
+		cloudshell.SetLabels(map[string]string{constants.CloudshellPodLabelKey: pod.Name})
+		if err := c.Update(context.TODO(), cloudshell); err != nil {
+			return err
+		}
+
+		if err = c.StartPodForCloudShell(ctx, cloudshell); err != nil {
+			klog.ErrorS(err, "Failed to start pod for CloudShell", "cloudshell", klog.KObj(cloudshell))
+			return err
+		}
+
+		// TODO: pod is not running?
+
+		return c.CreateRouteRule(ctx, cloudshell)
+	}
+
+	// TODO:
+	if IsCloudshellFinished(cloudshell) {
+		// todo restore the pod, cleanup the kubeConfig
+		_ = c.workerPool.Back(pod)
+
 		if cloudshell.Spec.Cleanup {
 			if err = c.Delete(ctx, cloudshell); err != nil {
 				klog.ErrorS(err, "Failed to delete cloudshell", "cloudshell", klog.KObj(cloudshell))
@@ -222,36 +250,6 @@ func (c *CloudShellController) syncCloudShell(ctx context.Context, cloudshell *c
 		return nil
 	}
 
-	// 1. GetPodForCloudShell, borrow pod from workerPool if not exist
-	// 2. StartPodForCloudShell (1) copy kubeConfig (2) start ttyd
-	if !ok {
-		pod, err = c.workerPool.Borrow()
-		if err != nil {
-			klog.ErrorS(err, "Failed to get pod", "cloudshell", klog.KObj(cloudshell))
-			return err
-		}
-		if err = c.StartPodForCloudShell(ctx, cloudshell); err != nil {
-			klog.ErrorS(err, "Failed to start pod for CloudShell", "cloudshell", klog.KObj(cloudshell))
-			return err
-		}
-
-		cloudshell.SetLabels(map[string]string{constants.CloudshellPodLabelKey: pod.Name})
-		if err = c.UpdateCloudshellStatus(ctx, cloudshell, cloudshellv1alpha1.PhasePodReady); err != nil {
-			return err
-		}
-	}
-
-	if IsCloudShellPodReady(cloudshell) {
-		if len(cloudshell.Status.AccessURL) == 0 {
-			if err = c.CreateRouteRule(ctx, cloudshell); err != nil {
-				return err
-			}
-		}
-
-		if err = c.UpdateCloudshellStatus(ctx, cloudshell, cloudshellv1alpha1.PhaseReady); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
@@ -400,7 +398,7 @@ func (c *CloudShellController) CreateRouteRule(ctx context.Context, cloudshell *
 	}
 
 	cloudshell.Status.AccessURL = accessURL
-	return c.UpdateCloudshellStatus(ctx, cloudshell, cloudshellv1alpha1.PhaseCreatedRoute)
+	return c.UpdateCloudshellStatus(ctx, cloudshell, cloudshellv1alpha1.PhaseReady)
 }
 
 // GetPodForCloudshell to find pod of cloudshell according to labels ""cloudshell.cloudtty.io/owner-name"".
@@ -468,9 +466,20 @@ func (c *CloudShellController) CreateCloudShellService(ctx context.Context, clou
 		serviceType = cloudshellv1alpha1.ExposureServiceClusterIP
 	}
 
-	serviceBytes, err := util.ParseTemplate(manifests.ServiceTmplV1, helper.NewServiceTemplateValue(cloudshell, serviceType))
+	podName, _ := hasBindPod(cloudshell)
+	serviceBytes, err := util.ParseTemplate(manifests.ServiceTmplV1, struct {
+		Name       string
+		Namespace  string
+		WorkerName string
+		Type       string
+	}{
+		Name:       fmt.Sprintf("cloudshell-%s", cloudshell.Name),
+		Namespace:  cloudshell.Namespace,
+		WorkerName: podName,
+		Type:       string(serviceType),
+	})
 	if err != nil {
-		return nil, errors.Wrap(err, "Failed to parse cloudshell service manifest")
+		return nil, errors.Wrap(err, "failed to parse cloudshell service manifest")
 	}
 
 	decoder := scheme.Codecs.UniversalDeserializer()
@@ -614,10 +623,16 @@ func (c *CloudShellController) UpdateCloudshellStatus(ctx context.Context, cloud
 	status := cloudshell.Status
 	return retry.RetryOnConflict(retry.DefaultBackoff, func() (err error) {
 		if !firstTry {
-			if getErr := c.Get(ctx, types.NamespacedName{Name: cloudshell.Name, Namespace: cloudshell.Namespace}, cloudshell); err != nil {
+			var getErr error
+			cloudshell, getErr = c.lister.CloudShells(cloudshell.Namespace).Get(cloudshell.Name)
+			if getErr != nil {
+				if apierrors.IsNotFound(err) {
+					return nil
+				}
 				return getErr
 			}
 		}
+
 		cloudshell.Status = status
 		cc := cloudshell.DeepCopy()
 
@@ -633,6 +648,19 @@ func (c *CloudShellController) removeCloudshell(ctx context.Context, cloudshell 
 	}
 	if err := c.removeFinalizer(cloudshell); err != nil {
 		return err
+	}
+
+	if podName, exist := hasBindPod(cloudshell); exist {
+		pod, err := c.podLister.Pods(cloudshell.Namespace).Get(podName)
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return err
+		}
+
+		// todo restore the pod, cleanup the kubeConfig
+		_ = c.workerPool.Back(pod)
 	}
 
 	klog.V(4).InfoS("delete cloudshell", "cloudshell", klog.KObj(cloudshell))
@@ -754,29 +782,6 @@ func VsNamespacedName(cloudshell *cloudshellv1alpha1.CloudShell) types.Namespace
 	}
 
 	return types.NamespacedName{Name: vsName, Namespace: namespace}
-}
-
-// isRunning check pod of job whether running, only one of the pods is running,
-// and be considered the cloudtty server is working.
-
-// TODO: The field `job.status.Ready` is alpha phase. we can depend on the field if it's to be beta.
-func (c *CloudShellController) isRunning(ctx context.Context, job *batchv1.Job) (bool, error) {
-	pods := &corev1.PodList{}
-	if err := c.List(ctx, pods, client.InNamespace(job.Namespace), client.MatchingLabels{"job-name": job.Name}); err != nil {
-		return false, err
-	}
-	for _, p := range pods.Items {
-		if p.Status.Phase != corev1.PodRunning || p.DeletionTimestamp != nil {
-			continue
-		}
-		for _, c := range p.Status.Conditions {
-			if c.Type == corev1.PodReady && c.Status == corev1.ConditionTrue {
-				return true, nil
-			}
-		}
-	}
-
-	return false, errors.Errorf("no pod of job %s is running", job.Name)
 }
 
 // GenerateKubeconfigInCluster load serviceaccount info under

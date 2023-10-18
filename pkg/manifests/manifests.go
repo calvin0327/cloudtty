@@ -90,26 +90,13 @@ metadata:
 spec:
   containers:
   - name: web-tty
-    image: "release-ci.daocloud.io/cloudtty/cloudshell:v1.99"
+    image: "release-ci.daocloud.io/cloudtty/cloudshell:v1.20"
     imagePullPolicy: IfNotPresent
-    command:
-    - bash
-    - "-c"
-    - |
-      ttyd sh
+    command: ["sleep", "36000"]
     ports:
     - containerPort: 7681
       name: tty-ui
       protocol: TCP
-    readinessProbe:
-      tcpSocket:
-        port: 7681
-      periodSeconds: 1
-      failureThreshold: 15
-    livenessProbe:
-      tcpSocket:
-        port: 7681
-      periodSeconds: 20
   restartPolicy: Never
 `
 
@@ -126,7 +113,7 @@ spec:
     protocol: TCP
     targetPort: 7681
   selector:
-    job-name: {{ .JobName }}
+    worker-name: {{ .WorkerName }}
   type: {{ .Type }}
 `
 

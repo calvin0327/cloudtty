@@ -1,0 +1,11 @@
+apiVersion: cloudshell.cloudtty.io/v1alpha1
+kind: CloudShell
+metadata:
+  name: cloudshell-sample
+  namespace: cloudtty-system
+spec:
+  secretRef:
+    name: "my-kubeconfig"
+  commandAction: "bash"
+  ttl: 500
+  once: false
