@@ -9,9 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cloudtty/cloudtty/pkg/generated/listers/cloudshell/v1alpha1"
-	"github.com/cloudtty/cloudtty/pkg/helper"
-	"github.com/cloudtty/cloudtty/pkg/utils/gclient"
 	"github.com/pkg/errors"
 	networkingv1beta1 "istio.io/api/networking/v1beta1"
 	istionetworkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
@@ -28,8 +25,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	listerscorev1 "k8s.io/client-go/listers/core/v1"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
@@ -40,8 +37,11 @@ import (
 	cloudshellv1alpha1 "github.com/cloudtty/cloudtty/pkg/apis/cloudshell/v1alpha1"
 	"github.com/cloudtty/cloudtty/pkg/constants"
 	cloudshellinformers "github.com/cloudtty/cloudtty/pkg/generated/informers/externalversions/cloudshell/v1alpha1"
+	"github.com/cloudtty/cloudtty/pkg/generated/listers/cloudshell/v1alpha1"
+	"github.com/cloudtty/cloudtty/pkg/helper"
 	"github.com/cloudtty/cloudtty/pkg/manifests"
 	util "github.com/cloudtty/cloudtty/pkg/utils"
+	"github.com/cloudtty/cloudtty/pkg/utils/gclient"
 	worerkpool "github.com/cloudtty/cloudtty/pkg/workerpool"
 )
 
@@ -64,6 +64,7 @@ const (
 // CloudShellController reconciles a CloudShell object
 type CloudShellController struct {
 	client.Client
+	config     *rest.Config
 	Scheme     *runtime.Scheme
 	workerPool *worerkpool.WorkerPool
 
@@ -73,9 +74,11 @@ type CloudShellController struct {
 	podLister listerscorev1.PodLister
 }
 
-func NewController(client client.Client, wp *worerkpool.WorkerPool, csInformer cloudshellinformers.CloudShellInformer, podInformer informercorev1.PodInformer) *CloudShellController {
+func NewController(client client.Client, config *rest.Config, wp *worerkpool.WorkerPool,
+	csInformer cloudshellinformers.CloudShellInformer, podInformer informercorev1.PodInformer) *CloudShellController {
 	controller := &CloudShellController{
 		Client:     client,
+		config:     config,
 		Scheme:     gclient.NewSchema(),
 		workerPool: wp,
 		queue: workqueue.NewRateLimitingQueue(
@@ -240,6 +243,7 @@ func (c *CloudShellController) syncCloudShell(ctx context.Context, cloudshell *c
 		if err = c.resetPod(ctx, cloudshell); err != nil {
 			return err
 		}
+
 		_ = c.workerPool.Back(pod)
 
 		if cloudshell.Spec.Cleanup {
@@ -302,14 +306,14 @@ func (c *CloudShellController) StartPodForCloudShell(ctx context.Context, clouds
 func (c *CloudShellController) StartTTYd(ctx context.Context, cloudshell *cloudshellv1alpha1.CloudShell, kubeConfigByte []byte) error {
 	// copy kubeConfig
 	echoCommand := fmt.Sprintf("echo '%s' > %s", kubeConfigByte, KubeConfigPath)
-	if err := execCommand(cloudshell, []string{"bash", "-c", echoCommand}, kubeConfigByte); err != nil {
+	if err := execCommand(cloudshell, []string{"bash", "-c", echoCommand}, c.config); err != nil {
 		return err
 	}
 
 	// start ttyd, ttyd args passed as shell parameter
 	// case: ttydCommand := []string{"/root/startup.sh", "100", "true", "false", "kubectl get po -n default"}
 	ttydCommand := []string{startScriptPath, string(cloudshell.Spec.Ttl), fmt.Sprint(cloudshell.Spec.Once), fmt.Sprint(cloudshell.Spec.UrlArg), cloudshell.Spec.CommandAction}
-	if err := execCommand(cloudshell, ttydCommand, kubeConfigByte); err != nil {
+	if err := execCommand(cloudshell, ttydCommand, c.config); err != nil {
 		return err
 	}
 
@@ -664,6 +668,7 @@ func (c *CloudShellController) removeCloudshell(ctx context.Context, cloudshell 
 		if err = c.resetPod(ctx, cloudshell); err != nil {
 			return err
 		}
+
 		_ = c.workerPool.Back(pod)
 	}
 
@@ -820,24 +825,14 @@ func hasBindPod(cloudshell *cloudshellv1alpha1.CloudShell) (string, bool) {
 	return podName, ok
 }
 
-func execCommand(cloudshell *cloudshellv1alpha1.CloudShell, command []string, kubeConfigByte []byte) error {
-	clientConfig, err := clientcmd.NewClientConfigFromBytes(kubeConfigByte)
-	if err != nil {
-		klog.V(4).ErrorS(err, "unable to create client config from kubeConfig bytes", "cloudshell", cloudshell.Name)
-		return err
-	}
-
-	config, err := clientConfig.ClientConfig()
-	if err != nil {
-		return err
-	}
+func execCommand(cloudshell *cloudshellv1alpha1.CloudShell, command []string, config *rest.Config) error {
 	config.GroupVersion = &corev1.SchemeGroupVersion
 	config.NegotiatedSerializer = scheme.Codecs.WithoutConversion()
 	config.APIPath = "/api"
 
 	clusterClient, err := kubernetes.NewForConfig(config)
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	options := &exec.ExecOptions{
@@ -870,14 +865,8 @@ func execCommand(cloudshell *cloudshellv1alpha1.CloudShell, command []string, ku
 
 // resetPod cleanup the kubeConfig and kill ttyd
 func (c *CloudShellController) resetPod(ctx context.Context, cloudshell *cloudshellv1alpha1.CloudShell) error {
-	secret := &corev1.Secret{}
-	if err := c.Client.Get(ctx, client.ObjectKey{Namespace: cloudshell.Namespace, Name: cloudshell.Spec.SecretRef.Name}, secret); err != nil {
-		return err
-	}
-	kubeConfigByte := secret.Data["config"]
-
 	cleanupCommand := []string{endScriptPath}
-	if err := execCommand(cloudshell, cleanupCommand, kubeConfigByte); err != nil {
+	if err := execCommand(cloudshell, cleanupCommand, c.config); err != nil {
 		return err
 	}
 
