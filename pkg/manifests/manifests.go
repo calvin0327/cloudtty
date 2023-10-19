@@ -26,7 +26,7 @@ metadata:
 spec:
   containers:
   - name: web-tty
-    image: "release-ci.daocloud.io/cloudtty/cloudshell:v1.20"
+    image: "release-ci.daocloud.io/cloudtty/cloudshell:v1.21"
     imagePullPolicy: IfNotPresent
     command: ["sleep", "36000"]
     ports:
