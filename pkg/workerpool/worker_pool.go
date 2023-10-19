@@ -28,8 +28,8 @@ import (
 )
 
 var (
-	defaultRefreshWorkerQuenenDuration = time.Minute * 3
-	ControllerFinalizer                = "cloudshell.cloudtty.io/worker-pool"
+	defaultRefreshWorkerQueueDuration = time.Minute * 3
+	ControllerFinalizer               = "cloudshell.cloudtty.io/worker-pool"
 )
 
 type WorkerPool struct {
@@ -37,12 +37,12 @@ type WorkerPool struct {
 	namespace string
 	clienset  clientset.Interface
 
-	coreWorkerLimit             int
-	maxWorkerLimit              int
-	workerQueue                 Interface
-	checkAndCreateWorkSignal    chan struct{}
-	isDelayWorkerQuenen         bool
-	refreshWorkerQuenenDuration time.Duration
+	coreWorkerLimit            int
+	maxWorkerLimit             int
+	workerQueue                Interface
+	checkAndCreateWorkSignal   chan struct{}
+	isDelayWorkerQueue         bool
+	refreshWorkerQueueDuration time.Duration
 
 	queue       workqueue.RateLimitingInterface
 	podInformer cache.SharedIndexInformer
@@ -50,16 +50,16 @@ type WorkerPool struct {
 }
 
 func New(namespace string, clientSet clientset.Interface, coreQueueLimit, maxWorkerLimit int,
-	isDelayWorkerQuenen bool, podInformer informercorev1.PodInformer) *WorkerPool {
+	isDelayWorkerQueue bool, podInformer informercorev1.PodInformer) *WorkerPool {
 	workerPool := &WorkerPool{
-		clienset:                    clientSet,
-		namespace:                   namespace,
-		workerQueue:                 newQueue(),
-		coreWorkerLimit:             coreQueueLimit,
-		maxWorkerLimit:              maxWorkerLimit,
-		checkAndCreateWorkSignal:    make(chan struct{}),
-		isDelayWorkerQuenen:         isDelayWorkerQuenen,
-		refreshWorkerQuenenDuration: defaultRefreshWorkerQuenenDuration,
+		clienset:                   clientSet,
+		namespace:                  namespace,
+		workerQueue:                newQueue(),
+		coreWorkerLimit:            coreQueueLimit,
+		maxWorkerLimit:             maxWorkerLimit,
+		checkAndCreateWorkSignal:   make(chan struct{}),
+		isDelayWorkerQueue:         isDelayWorkerQueue,
+		refreshWorkerQueueDuration: defaultRefreshWorkerQueueDuration,
 
 		queue: workqueue.NewRateLimitingQueue(
 			workqueue.NewItemExponentialFailureRateLimiter(2*time.Second, 5*time.Second),
@@ -172,9 +172,9 @@ func (w *WorkerPool) Run(worker int, stopCh <-chan struct{}) {
 		klog.Errorf("cloudshell manager: wait for informer factory failed")
 	}
 
-	go w.tryRefreshWorkerQuenen(stopCh)
+	go w.tryRefreshWorkerQueue(stopCh)
 
-	if !w.isDelayWorkerQuenen {
+	if !w.isDelayWorkerQueue {
 		w.checkAndCreateWorkSignal <- struct{}{}
 	}
 
@@ -271,21 +271,21 @@ func (w *WorkerPool) reconcilePod(pod *corev1.Pod) error {
 	return nil
 }
 
-func (w *WorkerPool) tryRefreshWorkerQuenen(stop <-chan struct{}) {
-	t := time.NewTimer(w.refreshWorkerQuenenDuration)
+func (w *WorkerPool) tryRefreshWorkerQueue(stop <-chan struct{}) {
+	t := time.NewTimer(w.refreshWorkerQueueDuration)
 	for {
 		select {
 		case <-t.C:
-			w.refreshWorkerQuenen()
+			w.refreshWorkerQueue()
 		case <-w.checkAndCreateWorkSignal:
-			w.refreshWorkerQuenen()
+			w.refreshWorkerQueue()
 		case <-stop:
 			return
 		}
 	}
 }
 
-func (w *WorkerPool) refreshWorkerQuenen() {
+func (w *WorkerPool) refreshWorkerQueue() {
 	w.Lock()
 	defer w.Unlock()
 
