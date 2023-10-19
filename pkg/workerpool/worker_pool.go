@@ -28,21 +28,21 @@ import (
 )
 
 var (
-	defaultRefreshWorkerQuenenDuration = time.Minute * 3
-	ControllerFinalizer                = "cloudshell.cloudtty.io/worker-pool"
+	defaultRefreshWorkerQueueDuration = time.Minute * 3
+	ControllerFinalizer               = "cloudshell.cloudtty.io/worker-pool"
 )
 
 type WorkerPool struct {
 	sync.Mutex
 	namespace string
-	clienset  clientset.Interface
+	clientset clientset.Interface
 
-	coreWorkerLimit             int
-	maxWorkerLimit              int
-	workerQueue                 Interface
-	checkAndCreateWorkSignal    chan struct{}
-	isDelayWorkerQuenen         bool
-	refreshWorkerQuenenDuration time.Duration
+	coreWorkerLimit            int
+	maxWorkerLimit             int
+	workerQueue                Interface
+	checkAndCreateWorkSignal   chan struct{}
+	isDelayWorkerQueue         bool
+	refreshWorkerQueueDuration time.Duration
 
 	queue       workqueue.RateLimitingInterface
 	podInformer cache.SharedIndexInformer
@@ -50,16 +50,16 @@ type WorkerPool struct {
 }
 
 func New(namespace string, clientSet clientset.Interface, coreQueueLimit, maxWorkerLimit int,
-	isDelayWorkerQuenen bool, podInformer informercorev1.PodInformer) *WorkerPool {
+	isDelayWorkerQueue bool, podInformer informercorev1.PodInformer) *WorkerPool {
 	workerPool := &WorkerPool{
-		clienset:                    clientSet,
-		namespace:                   namespace,
-		workerQueue:                 newQueue(),
-		coreWorkerLimit:             coreQueueLimit,
-		maxWorkerLimit:              maxWorkerLimit,
-		checkAndCreateWorkSignal:    make(chan struct{}),
-		isDelayWorkerQuenen:         isDelayWorkerQuenen,
-		refreshWorkerQuenenDuration: defaultRefreshWorkerQuenenDuration,
+		clientset:                  clientSet,
+		namespace:                  namespace,
+		workerQueue:                newQueue(),
+		coreWorkerLimit:            coreQueueLimit,
+		maxWorkerLimit:             maxWorkerLimit,
+		checkAndCreateWorkSignal:   make(chan struct{}),
+		isDelayWorkerQueue:         isDelayWorkerQueue,
+		refreshWorkerQueueDuration: defaultRefreshWorkerQueueDuration,
 
 		queue: workqueue.NewRateLimitingQueue(
 			workqueue.NewItemExponentialFailureRateLimiter(2*time.Second, 5*time.Second),
@@ -123,7 +123,7 @@ func (w *WorkerPool) Borrow() (*corev1.Pod, error) {
 			}
 		}
 		if controllerutil.RemoveFinalizer(pod, ControllerFinalizer) || updated {
-			_, err = w.clienset.CoreV1().Pods(namespace).Update(context.TODO(), pod, metav1.UpdateOptions{})
+			_, err = w.clientset.CoreV1().Pods(namespace).Update(context.TODO(), pod, metav1.UpdateOptions{})
 		}
 
 		return err
@@ -150,7 +150,7 @@ func (w *WorkerPool) Back(worker *corev1.Pod) error {
 				worker.Labels = map[string]string{}
 			}
 			worker.Labels[constants.CloudshellIdleWorkerKey] = ""
-			_, err = w.clienset.CoreV1().Pods(worker.Namespace).Update(context.TODO(), worker, metav1.UpdateOptions{})
+			_, err = w.clientset.CoreV1().Pods(worker.Namespace).Update(context.TODO(), worker, metav1.UpdateOptions{})
 			return err
 		})
 
@@ -172,9 +172,9 @@ func (w *WorkerPool) Run(worker int, stopCh <-chan struct{}) {
 		klog.Errorf("cloudshell manager: wait for informer factory failed")
 	}
 
-	go w.tryRefreshWorkerQuenen(stopCh)
+	go w.tryRefreshWorkerQueue(stopCh)
 
-	if !w.isDelayWorkerQuenen {
+	if !w.isDelayWorkerQueue {
 		w.checkAndCreateWorkSignal <- struct{}{}
 	}
 
@@ -257,7 +257,7 @@ func (w *WorkerPool) reconcilePod(pod *corev1.Pod) error {
 			if !controllerutil.RemoveFinalizer(newer, ControllerFinalizer) {
 				return nil
 			}
-			_, err = w.clienset.CoreV1().Pods(newer.Namespace).Update(context.TODO(), newer, metav1.UpdateOptions{})
+			_, err = w.clientset.CoreV1().Pods(newer.Namespace).Update(context.TODO(), newer, metav1.UpdateOptions{})
 			return err
 		})
 		return nil
@@ -271,25 +271,25 @@ func (w *WorkerPool) reconcilePod(pod *corev1.Pod) error {
 	return nil
 }
 
-func (w *WorkerPool) tryRefreshWorkerQuenen(stop <-chan struct{}) {
-	t := time.NewTimer(w.refreshWorkerQuenenDuration)
+func (w *WorkerPool) tryRefreshWorkerQueue(stop <-chan struct{}) {
+	t := time.NewTimer(w.refreshWorkerQueueDuration)
 	for {
 		select {
 		case <-t.C:
-			w.refreshWorkerQuenen()
+			w.refreshWorkerQueue()
 		case <-w.checkAndCreateWorkSignal:
-			w.refreshWorkerQuenen()
+			w.refreshWorkerQueue()
 		case <-stop:
 			return
 		}
 	}
 }
 
-func (w *WorkerPool) refreshWorkerQuenen() {
+func (w *WorkerPool) refreshWorkerQueue() {
 	w.Lock()
 	defer w.Unlock()
 
-	pods, err := w.clienset.CoreV1().Pods(w.namespace).List(context.TODO(), metav1.ListOptions{
+	pods, err := w.clientset.CoreV1().Pods(w.namespace).List(context.TODO(), metav1.ListOptions{
 		LabelSelector: labels.Set{constants.CloudshellIdleWorkerKey: ""}.String(),
 	})
 	if err != nil {
@@ -346,7 +346,7 @@ func (w *WorkerPool) createWorker() error {
 	pod.SetLabels(map[string]string{constants.CloudshellIdleWorkerKey: "", "worker-name": pod.Name})
 	controllerutil.AddFinalizer(pod, ControllerFinalizer)
 
-	_, err = w.clienset.CoreV1().Pods(w.namespace).Create(context.TODO(), pod, metav1.CreateOptions{})
+	_, err = w.clientset.CoreV1().Pods(w.namespace).Create(context.TODO(), pod, metav1.CreateOptions{})
 	if err != nil {
 		return err
 	}
@@ -355,7 +355,7 @@ func (w *WorkerPool) createWorker() error {
 }
 
 func (w *WorkerPool) deleteWorker(worker *corev1.Pod) error {
-	return w.clienset.CoreV1().Pods(worker.GetNamespace()).Delete(context.TODO(), worker.GetName(), metav1.DeleteOptions{})
+	return w.clientset.CoreV1().Pods(worker.GetNamespace()).Delete(context.TODO(), worker.GetName(), metav1.DeleteOptions{})
 }
 
 func isIdleWorker(worker *corev1.Pod) bool {
