@@ -9,10 +9,10 @@ RUN yarn install
 COPY html/ /app/
 RUN yarn run build
 
-FROM ghcr.io/dtzar/helm-kubectl:3.12.3
+FROM ghcr.io/dtzar/helm-kubectl:3.13.2
 SHELL [ "/bin/bash", "-c" ]
 
-ARG TTYD_VERSION=1.7.2
+ARG TTYD_VERSION=1.7.4
 
 RUN echo "https://mirrors.aliyun.com/alpine/edge/testing/" >> /etc/apk/repositories \
     && apk update \
@@ -31,11 +31,11 @@ RUN ttydArch="$(uname -m)" && echo "Building arch of $ttydArch.." \
     && mv ttyd.${ttydArch} /usr/local/bin/ttyd \
     && which ttyd
 
-RUN mkdir /usr/lib/ttyd
-COPY --from=builder /app/dist/inline.html /usr/lib/ttyd/index.html
+RUN mkdir /ttyd
+COPY --from=builder /app/dist/inline.html /ttyd/index.html
 
-WORKDIR /root
+WORKDIR /ttyd
 RUN mkdir /root/.kube
-COPY ./startup.sh  /root/
-COPY ./resetpod.sh /root/
+COPY ./docker/cloudshell/script/startup.sh  /root/
+COPY ./docker/cloudshell/script/resetpod.sh /root/
 RUN chmod +x startup.sh resetpod.sh

@@ -1,11 +1,28 @@
-apiVersion: cloudshell.cloudtty.io/v1alpha1
+# apiVersion: cloudshell.cloudtty.io/v1alpha2
+# kind: CloudShell
+# metadata:
+#   name: cloudshell-sample4
+#   namespace: test
+# spec:
+#   secretRef:
+#     name: "my-kubeconfig"
+#   commandAction: "bash"
+#   ttlSecondsAfterStarted: 100
+#   once: false
+#   cleanup: true
+
+---
+
+apiVersion: cloudshell.cloudtty.io/v1alpha2
 kind: CloudShell
 metadata:
-  name: cloudshell-sample
+  name: cloudshell-sample9
   namespace: cloudtty-system
 spec:
   secretRef:
     name: "my-kubeconfig"
   commandAction: "bash"
-  ttl: 500
+  ttlSecondsAfterStarted: 100
   once: false
+  cleanup: true
+  image: release-ci.daocloud.io/cloudtty/cloudshell:v1.23

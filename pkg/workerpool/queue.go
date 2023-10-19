@@ -10,6 +10,8 @@ type Interface interface {
 	Len() int
 	Get() interface{}
 	Remove(item interface{})
+	Has(item interface{}) bool
+	All() []interface{}
 }
 
 type Type struct {
@@ -95,4 +97,23 @@ func (q *Type) Remove(item interface{}) {
 	}
 
 	q.dirty.delete(item)
+}
+
+func (q *Type) Has(item interface{}) bool {
+	q.RWMutex.RLock()
+	defer q.RWMutex.RUnlock()
+
+	return q.dirty.has(item)
+}
+
+func (q *Type) All() []interface{} {
+	q.RWMutex.RLock()
+	defer q.RWMutex.RUnlock()
+
+	items := make([]interface{}, 0, q.Len())
+	for _, item := range q.queue {
+		items = append(items, item)
+	}
+
+	return items
 }

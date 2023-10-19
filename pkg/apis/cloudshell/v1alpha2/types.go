@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package v1alpha1
+package v1alpha2
 
 import (
 	corev1 "k8s.io/api/core/v1"
@@ -31,12 +31,9 @@ const (
 	ExposureIngress          ExposureMode = "Ingress"
 	ExposureVirtualService   ExposureMode = "VirtualService"
 
-	PhaseCreatedJob   = "CreatedJob"
-	PhasePodReady     = "PodReady"
-	PhaseCreatedRoute = "CreatedRouteRule"
-	PhaseReady        = "Ready"
-	PhaseCompleted    = "Complete"
-	PhaseFailed       = "Failed"
+	PhaseReady     = "Ready"
+	PhaseCompleted = "Complete"
+	PhaseFailed    = "Failed"
 )
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
@@ -55,9 +52,6 @@ type CloudShellSpec struct {
 	// +optional
 	SecretRef *LocalSecretReference `json:"secretRef,omitempty"`
 
-	// +optional
-	RunAsUser string `json:"runAsUser,omitempty"`
-
 	// Image defines the image to cloudshell, we can customize an image.
 	// Note: the image must be built on top of the officially available base image.
 	// Please see: https://github.com/cloudtty/cloudtty#how-to-build-custom-cloudshell-image
@@ -72,8 +66,7 @@ type CloudShellSpec struct {
 	CommandAction string `json:"commandAction,omitempty"`
 
 	// +optional
-	// TODO: repalce type `int32` of ttl with `time`.
-	Ttl int32 `json:"ttl,omitempty"`
+	TTLSecondsAfterStarted *int64 `json:"ttlSecondsAfterStarted,omitempty"`
 
 	// Cleanup specified whether to delete cloudshell resources when corresponding job status is completed.
 	// +optional
@@ -163,6 +156,10 @@ type CloudShellStatus struct {
 
 	// +optional
 	AccessURL string `json:"accessUrl"`
+
+	// Information when was the last time the pod was successfully scheduled.
+	// +optional
+	LastScheduleTime *metav1.Time `json:"lastScheduleTime,omitempty"`
 }
 
 // +genclient

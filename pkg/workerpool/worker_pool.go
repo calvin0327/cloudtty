@@ -3,63 +3,78 @@ package workpool
 import (
 	"context"
 	"fmt"
+	"math"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/rand"
 	informercorev1 "k8s.io/client-go/informers/core/v1"
-	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	listerscorev1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	cloudshellv1alpha2 "github.com/cloudtty/cloudtty/pkg/apis/cloudshell/v1alpha2"
 	"github.com/cloudtty/cloudtty/pkg/constants"
 	"github.com/cloudtty/cloudtty/pkg/manifests"
 	util "github.com/cloudtty/cloudtty/pkg/utils"
 )
 
 var (
-	defaultRefreshWorkerQueueDuration = time.Minute * 3
+	// DefaultScaleInWorkerQueueDuration define the duration to scale in the workers.
+	DefaultScaleInWorkerQueueDuration = time.Hour * 3
+	ScaleInQueueThreshold             = 0.75
 	ControllerFinalizer               = "cloudshell.cloudtty.io/worker-pool"
+	NotWorkerErr                      = errors.New("There is no worker in pool")
 )
 
 type WorkerPool struct {
 	sync.Mutex
-	namespace string
-	clientset clientset.Interface
+	client.Client
 
-	coreWorkerLimit            int
-	maxWorkerLimit             int
-	workerQueue                Interface
-	checkAndCreateWorkSignal   chan struct{}
-	isDelayWorkerQueue         bool
-	refreshWorkerQueueDuration time.Duration
+	coreWorkerLimit    int
+	maxWorkerLimit     int
+	workerQueue        Interface
+	requestQueue       Interface
+	matchRequestSignal chan struct{}
+
+	scaleInQueueDuration time.Duration
 
 	queue       workqueue.RateLimitingInterface
 	podInformer cache.SharedIndexInformer
 	podLister   listerscorev1.PodLister
 }
 
-func New(namespace string, clientSet clientset.Interface, coreQueueLimit, maxWorkerLimit int,
-	isDelayWorkerQueue bool, podInformer informercorev1.PodInformer) *WorkerPool {
+// Request represents a request to borrow a worker from worker pool. if the delay is true,
+// the cloudshell queue must not be empty, because when the worker is running, it needs to
+// inform the controller.
+type Request struct {
+	Cloudshell      string
+	Namespace       string
+	Image           string
+	CloudShellQueue workqueue.RateLimitingInterface
+}
+
+func New(client client.Client, coreQueueLimit, maxWorkerLimit int, podInformer informercorev1.PodInformer) *WorkerPool {
 	workerPool := &WorkerPool{
-		clientset:                  clientSet,
-		namespace:                  namespace,
-		workerQueue:                newQueue(),
-		coreWorkerLimit:            coreQueueLimit,
-		maxWorkerLimit:             maxWorkerLimit,
-		checkAndCreateWorkSignal:   make(chan struct{}),
-		isDelayWorkerQueue:         isDelayWorkerQueue,
-		refreshWorkerQueueDuration: defaultRefreshWorkerQueueDuration,
+		Client:               client,
+		workerQueue:          newQueue(),
+		requestQueue:         newQueue(),
+		coreWorkerLimit:      coreQueueLimit,
+		maxWorkerLimit:       maxWorkerLimit,
+		matchRequestSignal:   make(chan struct{}),
+		scaleInQueueDuration: DefaultScaleInWorkerQueueDuration,
 
 		queue: workqueue.NewRateLimitingQueue(
 			workqueue.NewItemExponentialFailureRateLimiter(2*time.Second, 5*time.Second),
@@ -95,101 +110,31 @@ func (w *WorkerPool) enqueue(obj interface{}) {
 	}
 }
 
-func (w *WorkerPool) Borrow() (*corev1.Pod, error) {
-	w.checkAndCreateWorkSignal <- struct{}{}
-
-	item := w.workerQueue.Get()
-	if item == nil {
-		return nil, fmt.Errorf("the pool is empty")
-	}
-	objKey := item.(string)
-	namespace, name, _ := cache.SplitMetaNamespaceKey(objKey)
-
-	var pod *corev1.Pod
-	retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		var err error
-		pod, err = w.podLister.Pods(namespace).Get(name)
-		if err != nil {
-			if apierrors.IsNotFound(err) {
-				return nil
-			}
-		}
-
-		var updated bool
-		if pod.Labels != nil {
-			if _, exist := pod.Labels[constants.CloudshellIdleWorkerKey]; exist {
-				delete(pod.Labels, constants.CloudshellIdleWorkerKey)
-				updated = true
-			}
-		}
-		if controllerutil.RemoveFinalizer(pod, ControllerFinalizer) || updated {
-			_, err = w.clientset.CoreV1().Pods(namespace).Update(context.TODO(), pod, metav1.UpdateOptions{})
-		}
-
-		return err
-	})
-
-	// TODO: the pod is nil?
-	return pod, nil
-}
-
-func (w *WorkerPool) Back(worker *corev1.Pod) error {
-	if worker != nil {
-		retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			worker, err := w.podLister.Pods(worker.Namespace).Get(worker.Name)
-			if err != nil {
-				if apierrors.IsNotFound(err) {
-					return nil
-				}
-				return err
-			}
-
-			controllerutil.AddFinalizer(worker, ControllerFinalizer)
-
-			if worker.Labels == nil {
-				worker.Labels = map[string]string{}
-			}
-			worker.Labels[constants.CloudshellIdleWorkerKey] = ""
-			_, err = w.clientset.CoreV1().Pods(worker.Namespace).Update(context.TODO(), worker, metav1.UpdateOptions{})
-			return err
-		})
-
-		if w.workerQueue.Len() < w.maxWorkerLimit {
-			objKey, _ := cache.MetaNamespaceKeyFunc(worker)
-			w.workerQueue.Add(objKey)
-		} else {
-			if err := w.deleteWorker(worker); err != nil {
-				klog.ErrorS(err, "failed to delete worker")
-			}
-		}
-	}
-
-	return nil
-}
-
-func (w *WorkerPool) Run(worker int, stopCh <-chan struct{}) {
+func (w *WorkerPool) Run(stopCh <-chan struct{}) {
 	if !cache.WaitForCacheSync(stopCh, w.podInformer.HasSynced) {
 		klog.Errorf("cloudshell manager: wait for informer factory failed")
 	}
 
-	go w.tryRefreshWorkerQueue(stopCh)
-
-	if !w.isDelayWorkerQueue {
-		w.checkAndCreateWorkSignal <- struct{}{}
-	}
-
-	w.run(worker, stopCh)
+	w.run(stopCh)
 }
 
-func (w *WorkerPool) run(workers int, stopCh <-chan struct{}) {
+func (w *WorkerPool) run(stopCh <-chan struct{}) {
 	var waitGroup sync.WaitGroup
-	for i := 0; i < workers; i++ {
-		waitGroup.Add(1)
-		go func() {
-			defer waitGroup.Done()
-			w.worker(stopCh)
-		}()
-	}
+	waitGroup.Add(3)
+	go func() {
+		defer waitGroup.Done()
+		w.worker(stopCh)
+	}()
+
+	go func() {
+		defer waitGroup.Done()
+		w.tryHandleRequestQueue(stopCh)
+	}()
+
+	go func() {
+		defer waitGroup.Done()
+		w.tryScaleInWorkerQueue(stopCh)
+	}()
 
 	<-stopCh
 
@@ -231,7 +176,7 @@ func (w *WorkerPool) processNextCluster() (continued bool) {
 	}
 
 	pod = pod.DeepCopy()
-	if err := w.reconcilePod(pod); err != nil {
+	if err := w.reconcile(pod); err != nil {
 		klog.ErrorS(err, "failed to reconcile pod", "pod", name, "num requeues", w.queue.NumRequeues(key))
 		w.queue.Add(key)
 		return true
@@ -241,14 +186,16 @@ func (w *WorkerPool) processNextCluster() (continued bool) {
 	return
 }
 
-func (w *WorkerPool) reconcilePod(pod *corev1.Pod) error {
-	if !pod.DeletionTimestamp.IsZero() {
-		key, _ := cache.MetaNamespaceKeyFunc(pod)
+func (w *WorkerPool) reconcile(worker *corev1.Pod) error {
+	key, _ := WorkerKeyFunc(worker)
+
+	// we need remove worker from worker queue when deleting the pod.
+	if !worker.DeletionTimestamp.IsZero() {
 		w.workerQueue.Remove(key)
 
-		newer := pod.DeepCopy()
-		retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			newer, err := w.podLister.Pods(newer.Namespace).Get(newer.Name)
+		return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			newer := &corev1.Pod{}
+			err := w.Get(context.TODO(), client.ObjectKey{Namespace: worker.Namespace, Name: worker.Name}, newer)
 			if err != nil {
 				if apierrors.IsNotFound(err) {
 					return nil
@@ -257,79 +204,276 @@ func (w *WorkerPool) reconcilePod(pod *corev1.Pod) error {
 			if !controllerutil.RemoveFinalizer(newer, ControllerFinalizer) {
 				return nil
 			}
-			_, err = w.clientset.CoreV1().Pods(newer.Namespace).Update(context.TODO(), newer, metav1.UpdateOptions{})
-			return err
+
+			return w.Update(context.TODO(), newer)
 		})
-		return nil
 	}
 
-	if util.IsPodReady(pod) {
-		key, _ := cache.MetaNamespaceKeyFunc(pod)
+	if !util.IsPodReady(worker) {
+		w.workerQueue.Remove(key)
+	} else {
 		w.workerQueue.Add(key)
+		w.matchRequestSignal <- struct{}{}
 	}
 
 	return nil
 }
 
-func (w *WorkerPool) tryRefreshWorkerQueue(stop <-chan struct{}) {
-	t := time.NewTimer(w.refreshWorkerQueueDuration)
+func (w *WorkerPool) tryHandleRequestQueue(stop <-chan struct{}) {
+	t := time.NewTicker(time.Second * 5)
 	for {
 		select {
 		case <-t.C:
-			w.refreshWorkerQueue()
-		case <-w.checkAndCreateWorkSignal:
-			w.refreshWorkerQueue()
+			w.handlerandleRequestQueue()
+		case <-w.matchRequestSignal:
+			w.handlerandleRequestQueue()
 		case <-stop:
 			return
 		}
 	}
 }
 
-func (w *WorkerPool) refreshWorkerQueue() {
+func (w *WorkerPool) handlerandleRequestQueue() {
 	w.Lock()
 	defer w.Unlock()
 
-	pods, err := w.clientset.CoreV1().Pods(w.namespace).List(context.TODO(), metav1.ListOptions{
-		LabelSelector: labels.Set{constants.CloudshellIdleWorkerKey: ""}.String(),
-	})
-	if err != nil {
-		klog.ErrorS(err, "error when listing pod from informer cache")
-	}
-
-	for _, pod := range pods.Items {
-		if !isIdleWorker(&pod) {
-			continue
-		}
-
-		if w.workerQueue.Len() < w.maxWorkerLimit {
-			if util.IsPodReady(&pod) {
-				key, _ := cache.MetaNamespaceKeyFunc(pod)
-				w.workerQueue.Add(key)
+	for _, item := range w.requestQueue.All() {
+		req := item.(Request)
+		if _, err := w.matchWorkerFor(&req); err != nil {
+			if err != NotWorkerErr {
+				klog.ErrorS(err, "failed to create worker for cloudshell", req.Cloudshell)
 			}
 
-			// TODO: if the pod failed?
+			pods, err := w.podLister.Pods(req.Namespace).List(labels.Set{constants.WorkerRequestLabelKey: req.Cloudshell}.AsSelector())
+			if err != nil {
+				klog.ErrorS(err, "failed to list worker for cloudshell", req.Cloudshell)
+			}
+
+			// TODO: pod is failed?
+
+			if len(pods) == 0 {
+				if err := w.createWorker(&req); err != nil {
+					klog.ErrorS(err, "failed to create worker for cloudshell", req.Cloudshell)
+				}
+			}
 		} else {
-			if err := w.deleteWorker(&pod); err != nil {
-				klog.ErrorS(err, "error when deleting pod from informer cache")
-			}
-		}
-	}
+			cloudshell := &cloudshellv1alpha2.CloudShell{}
+			if err = w.Get(context.TODO(), client.ObjectKey{Namespace: req.Namespace, Name: req.Cloudshell}, cloudshell); err != nil {
+				if apierrors.IsNotFound(err) {
+					w.requestQueue.Remove(req)
+				}
 
-	if len(pods.Items) < w.coreWorkerLimit {
-		for i := 0; i < w.coreWorkerLimit-len(pods.Items); i++ {
-			if err := w.createWorker(); err != nil {
-				klog.ErrorS(err, "failed to create worker")
+				klog.ErrorS(err, "failed to get cloudshell", req.Cloudshell)
+				continue
 			}
+
+			key, _ := cache.MetaNamespaceKeyFunc(cloudshell)
+			req.CloudShellQueue.Add(key)
+
+			w.requestQueue.Remove(req)
 		}
 	}
 }
 
-func (w *WorkerPool) createWorker() error {
+func (w *WorkerPool) tryScaleInWorkerQueue(stop <-chan struct{}) {
+	t := time.NewTicker(w.scaleInQueueDuration)
+	for {
+		select {
+		case <-t.C:
+			w.scaleInWorkerQueue()
+		case <-stop:
+			return
+		}
+	}
+}
+
+func (w *WorkerPool) scaleInWorkerQueue() {
+	workers, err := w.podLister.List(labels.Set{constants.WorkerOwnerLabelKey: ""}.AsSelector())
+	if err != nil {
+		klog.ErrorS(err, "error when listing pod from informer cache")
+	}
+
+	idelWorkers := []*corev1.Pod{}
+	for _, pod := range workers {
+		// the tolerance time of not available pod is 30 minutes, if
+		// time out, we need to delete these pods.
+		if util.IsPodNotAvailable(pod, 30*60) {
+			if err := w.deleteWorker(pod); err != nil {
+				klog.ErrorS(err, "failed to delete worker that is not available for 30 minute", klog.KObjs(pod))
+			}
+		}
+
+		if util.IsPodReady(pod) {
+			if req := w.matchRequestFor(pod); req == nil {
+				idelWorkers = append(idelWorkers, pod)
+			}
+		}
+	}
+
+	if len(idelWorkers) > w.coreWorkerLimit {
+		// Sort by number of bindings first, and then by chronological
+		// order of creation if they are equal.
+		sort.Slice(idelWorkers, func(i, j int) bool {
+			one, two := idelWorkers[i], idelWorkers[j]
+
+			c1 := one.Labels[constants.WorkerBindingCountLabelKey]
+			c2 := two.Labels[constants.WorkerBindingCountLabelKey]
+			n1, _ := strconv.ParseInt(c1, 10, 32)
+			n2, _ := strconv.ParseInt(c2, 10, 32)
+
+			if n1 == n2 {
+				return one.CreationTimestamp.Before(&two.CreationTimestamp)
+			}
+
+			return n1 < n2
+		})
+
+		scaleNumber := float64(len(idelWorkers)-w.coreWorkerLimit) * ScaleInQueueThreshold
+		len := int(math.Floor(scaleNumber + 0.5))
+
+		for i := 0; i < len; i++ {
+			worker := idelWorkers[i]
+			if err := w.deleteWorker(worker); err != nil {
+				klog.ErrorS(err, "failed to delete worker that needs to be scaled in", klog.KObjs(worker))
+			} else {
+				key, _ := WorkerKeyFunc(worker)
+				w.workerQueue.Remove(key)
+			}
+		}
+	}
+
+	klog.V(2).Infof("the worker pool size is %d", w.workerQueue.Len())
+}
+
+func (w *WorkerPool) Borrow(req *Request) (*corev1.Pod, error) {
+	worker, err := w.matchWorkerFor(req)
+	if err != nil {
+		if err == NotWorkerErr {
+			// add the request to the request queue.
+			w.requestQueue.Add(*req)
+		}
+
+		return nil, err
+	}
+
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if len(worker.Labels) > 0 {
+			// recorde the binding count for worker, the count affects logic of gc.
+			var count int64 = 1
+			val, exist := worker.Labels[constants.WorkerBindingCountLabelKey]
+			if exist {
+				if num, err := strconv.ParseInt(val, 10, 32); err == nil {
+					count = num + 1
+				}
+			}
+			worker.Labels[constants.WorkerBindingCountLabelKey] = fmt.Sprint(count)
+
+			worker.Labels[constants.WorkerOwnerLabelKey] = req.Cloudshell
+			delete(worker.Labels, constants.WorkerRequestLabelKey)
+		}
+
+		controllerutil.RemoveFinalizer(worker, ControllerFinalizer)
+		return w.Update(context.TODO(), worker)
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// remove worker from queue.
+	key, _ := WorkerKeyFunc(worker)
+	w.workerQueue.Remove(key)
+
+	return worker, nil
+}
+
+// matchWorkerRequest returns the worker name.
+func (w *WorkerPool) matchWorkerFor(req *Request) (*corev1.Pod, error) {
+	var workerName string
+	for _, item := range w.workerQueue.All() {
+		ns, name, image, _ := SplitWorkerKey(item.(string))
+
+		if ns == req.Namespace && image == req.Image {
+			workerName = name
+			break
+		}
+	}
+
+	if len(workerName) != 0 {
+		worker, err := w.podLister.Pods(req.Namespace).Get(workerName)
+		// TODO: if err is notfound?
+		if err != nil {
+			return nil, err
+		}
+
+		return worker, nil
+	}
+
+	return nil, NotWorkerErr
+}
+
+func (w *WorkerPool) matchRequestFor(worker *corev1.Pod) *Request {
+	for _, item := range w.requestQueue.All() {
+		req := item.(Request)
+
+		ttyd := worker.Spec.Containers[0]
+		if req.Namespace == worker.Namespace && req.Image == ttyd.Image {
+			return &req
+		}
+	}
+
+	return nil
+}
+
+func (w *WorkerPool) Back(worker *corev1.Pod) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		newer, err := w.podLister.Pods(worker.Namespace).Get(worker.Name)
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return err
+		}
+
+		// if the worker is not ready, we delete it directly.
+		if !util.IsPodReady(newer) {
+			return w.deleteWorker(newer)
+		}
+
+		req := w.matchRequestFor(newer)
+
+		// if worker is not match to request and out of limit, we need to delete the worker.
+		if req == nil && w.workerQueue.Len() >= w.maxWorkerLimit {
+			return w.deleteWorker(newer)
+		}
+
+		controllerutil.AddFinalizer(newer, ControllerFinalizer)
+		if newer.Labels == nil {
+			newer.Labels = map[string]string{}
+		}
+
+		newer.Labels[constants.WorkerOwnerLabelKey] = ""
+		if err := w.Update(context.TODO(), newer); err != nil {
+			return err
+		}
+
+		objKey, _ := WorkerKeyFunc(worker)
+		w.workerQueue.Add(objKey)
+
+		if req != nil {
+			w.matchRequestSignal <- struct{}{}
+		}
+
+		return nil
+	})
+}
+
+func (w *WorkerPool) createWorker(req *Request) error {
 	podBytes, err := util.ParseTemplate(manifests.PodTmplV1, struct {
-		Name, Namespace string
+		Name, Namespace, Image string
 	}{
 		Name:      fmt.Sprintf("cloudshell-worker-%s", rand.String(5)),
-		Namespace: w.namespace,
+		Namespace: req.Namespace,
+		Image:     req.Image,
 	})
 	if err != nil {
 		return errors.Wrap(err, "failed create cloudshell job")
@@ -343,26 +487,67 @@ func (w *WorkerPool) createWorker() error {
 	}
 	pod := obj.(*corev1.Pod)
 
-	pod.SetLabels(map[string]string{constants.CloudshellIdleWorkerKey: "", "worker-name": pod.Name})
+	pod.SetLabels(map[string]string{
+		constants.WorkerOwnerLabelKey: "", constants.WorkerRequestLabelKey: req.Cloudshell,
+	})
+
 	controllerutil.AddFinalizer(pod, ControllerFinalizer)
 
-	_, err = w.clientset.CoreV1().Pods(w.namespace).Create(context.TODO(), pod, metav1.CreateOptions{})
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return w.Create(context.TODO(), pod)
 }
 
 func (w *WorkerPool) deleteWorker(worker *corev1.Pod) error {
-	return w.clientset.CoreV1().Pods(worker.GetNamespace()).Delete(context.TODO(), worker.GetName(), metav1.DeleteOptions{})
+	return w.Delete(context.TODO(), worker)
 }
 
 func isIdleWorker(worker *corev1.Pod) bool {
 	if worker.Labels != nil {
-		_, exist := worker.Labels[constants.CloudshellIdleWorkerKey]
-		return exist
+		owner, exist := worker.Labels[constants.WorkerOwnerLabelKey]
+		if !exist {
+			return true
+		}
+
+		return len(owner) == 0
 	}
 
-	return true
+	return false
+}
+
+// SplitWorkerKey returns the namespace, name, image that
+// WorkerKeyFunc encoded into key.
+//
+// packing/unpacking won't be necessary.
+func SplitWorkerKey(key string) (namespace, name, image string, err error) {
+	parts := strings.Split(key, "//")
+	switch len(parts) {
+	case 2:
+		// name only, no namespace
+		return "", parts[1], parts[0], nil
+	case 3:
+		// namespace and name
+		return parts[0], parts[2], parts[1], nil
+	}
+
+	return "", "", "", fmt.Errorf("unexpected key format: %q", key)
+}
+
+func WorkerKeyFunc(obj interface{}) (string, error) {
+	worker, ok := obj.(*corev1.Pod)
+	if !ok {
+		return "", fmt.Errorf("no support the type struct")
+	}
+
+	objName, err := cache.ObjectToName(worker)
+	if err != nil {
+		return "", err
+	}
+
+	// TODO: the first container is ttyd?
+	ttyd := worker.Spec.Containers[0]
+
+	if len(objName.Namespace) > 0 {
+		return fmt.Sprintf("%s//%s//%s", objName.Namespace, ttyd.Image, objName.Name), nil
+	}
+
+	return fmt.Sprintf("%s//%s", ttyd.Image, objName.Name), nil
 }

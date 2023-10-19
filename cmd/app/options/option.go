@@ -50,10 +50,11 @@ type Options struct {
 	LeaderElection   componentbaseconfig.LeaderElectionConfiguration
 	ClientConnection componentbaseconfig.ClientConnectionConfiguration
 
-	Master       string
-	Kubeconfig   string
-	WorkerNumber int // WorkerNumber is the number of worker goroutines
-	Logs         *logs.Options
+	Master          string
+	Kubeconfig      string
+	CoreWorkerLimit int
+	MaxWorkerLimit  int
+	Logs            *logs.Options
 }
 
 func NewOptions() (*Options, error) {
@@ -92,7 +93,8 @@ func (o *Options) Flags() cliflag.NamedFlagSets {
 	genericfs.StringVar(&o.ClientConnection.ContentType, "kube-api-content-type", o.ClientConnection.ContentType, "Content type of requests sent to apiserver.")
 	genericfs.Float32Var(&o.ClientConnection.QPS, "kube-api-qps", o.ClientConnection.QPS, "QPS to use while talking with kubernetes apiserver.")
 	genericfs.Int32Var(&o.ClientConnection.Burst, "kube-api-burst", o.ClientConnection.Burst, "Burst to use while talking with kubernetes apiserver.")
-	genericfs.IntVar(&o.WorkerNumber, "worker-number", 1, "The number of worker goroutines.")
+	genericfs.IntVar(&o.CoreWorkerLimit, "core-worker-limit", 5, "The core limit of worker pool.")
+	genericfs.IntVar(&o.MaxWorkerLimit, "max-worker-limit", 10, "The max limit of worker pool.")
 
 	fs := nfs.FlagSet("misc")
 	fs.StringVar(&o.Master, "master", o.Master, "The address of the Kubernetes API server (overrides any value in kubeconfig).")
@@ -142,18 +144,19 @@ func (o *Options) Config() (*config.Config, error) {
 		return nil, err
 	}
 
-	csClient, err := versioned.NewForConfig(kubeconfig)
+	cloudshellClient, err := versioned.NewForConfig(kubeconfig)
 	if err != nil {
 		return nil, err
 	}
 
 	return &config.Config{
 		KubeClient:       client,
-		CloudShellClient: csClient,
+		CloudShellClient: cloudshellClient,
 		Client:           runtimeClient,
 		Kubeconfig:       kubeconfig,
 		EventRecorder:    eventRecorder,
-		WorkerNumber:     o.WorkerNumber,
+		CoreWorkerLimit:  o.CoreWorkerLimit,
+		MaxWorkerLimit:   o.MaxWorkerLimit,
 
 		LeaderElection: o.LeaderElection,
 	}, nil

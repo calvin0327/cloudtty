@@ -5,10 +5,14 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/cloudtty/cloudtty/pkg/constants"
 	"github.com/cloudtty/cloudtty/pkg/controllers"
 	"github.com/cloudtty/cloudtty/pkg/generated/informers/externalversions"
 
 	"github.com/spf13/cobra"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/client-go/informers"
@@ -136,22 +140,29 @@ func Run(ctx context.Context, config *config.Config) error {
 }
 
 func StartControllers(c *config.Config, stopCh <-chan struct{}) error {
-	options := []informers.SharedInformerOption{
-		informers.WithNamespace(c.LeaderElection.ResourceNamespace),
+	ownerExist, err := labels.NewRequirement(constants.WorkerOwnerLabelKey, selection.Exists, nil)
+	if err != nil {
+		return err
 	}
 
-	factory := informers.NewSharedInformerFactoryWithOptions(c.KubeClient, 0, options...)
+	labelsSelector := labels.NewSelector().Add(*ownerExist)
+
+	factory := informers.NewSharedInformerFactoryWithOptions(c.KubeClient, 0,
+		informers.WithTweakListOptions(func(opts *metav1.ListOptions) {
+			opts.LabelSelector = labelsSelector.String()
+		}))
+
 	podInformer := factory.Core().V1().Pods()
-	pool := worerkpool.New(c.LeaderElection.ResourceNamespace, c.KubeClient, 3, 10, false, podInformer)
+	pool := worerkpool.New(c.Client, c.CoreWorkerLimit, c.MaxWorkerLimit, podInformer)
 
 	informerFactory := externalversions.NewSharedInformerFactory(c.CloudShellClient, 0)
-	informer := informerFactory.Cloudshell().V1alpha1().CloudShells()
-	controller := controllers.NewController(c.Client, c.Kubeconfig, pool, informer, podInformer)
+	informer := informerFactory.Cloudshell().V1alpha2().CloudShells()
+	controller := controllers.New(c.Client, c.Kubeconfig, pool, informer, podInformer)
 
 	factory.Start(stopCh)
 	informerFactory.Start(stopCh)
 
-	go pool.Run(1, stopCh)
+	go pool.Run(stopCh)
 	go controller.Run(1, stopCh)
 
 	<-stopCh

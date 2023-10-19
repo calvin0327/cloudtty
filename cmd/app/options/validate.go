@@ -24,8 +24,12 @@ func (o *Options) Validate() field.ErrorList {
 	errs := field.ErrorList{}
 	newPath := field.NewPath("Options")
 
-	if o.WorkerNumber <= 0 {
-		errs = append(errs, field.Invalid(newPath.Child("WorkerNumber"), o.WorkerNumber, "worker-number must be greater than 0"))
+	if o.CoreWorkerLimit < 0 {
+		errs = append(errs, field.Invalid(newPath.Child("CoreWorkerLimit"), o.MaxWorkerLimit, "core-worker-limit must be greater than or equals 0"))
+	}
+
+	if o.MaxWorkerLimit < 0 {
+		errs = append(errs, field.Invalid(newPath.Child("MaxWorkerLimit"), o.MaxWorkerLimit, "max-worker-limit must be greater than or equals 0"))
 	}
 
 	return errs

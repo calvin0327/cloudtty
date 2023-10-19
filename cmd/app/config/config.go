@@ -16,7 +16,8 @@ type Config struct {
 	Client           client.Client
 	Kubeconfig       *rest.Config
 	EventRecorder    record.EventRecorder
-	WorkerNumber     int
+	CoreWorkerLimit  int
+	MaxWorkerLimit   int
 
 	LeaderElection componentbaseconfig.LeaderElectionConfiguration
 }

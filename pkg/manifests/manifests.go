@@ -26,9 +26,13 @@ metadata:
 spec:
   containers:
   - name: web-tty
-    image: "release-ci.daocloud.io/cloudtty/cloudshell:v1.20"
+    image: {{ .Image }}
     imagePullPolicy: IfNotPresent
-    command: ["sleep", "36000"]
+    command:
+    - /bin/bash
+    - -ec
+    - |
+      while :; do sleep 2073600; done
     ports:
     - containerPort: 7681
       name: tty-ui
@@ -49,7 +53,7 @@ spec:
     protocol: TCP
     targetPort: 7681
   selector:
-    worker-name: {{ .WorkerName }}
+    worker.cloudtty.io/owner-name: {{ .Owner }}
   type: {{ .Type }}
 `
 
