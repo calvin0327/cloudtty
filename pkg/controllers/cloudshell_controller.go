@@ -57,7 +57,8 @@ const (
 	// MaxCloudShellBackOff is the max backoff period. Exported for tests.
 	MaxCloudShellBackOff = 5 * time.Second
 	KubeConfigPath       = "/root/.kube/config"
-	TTYdScriptPath       = "/root/startup.sh"
+	startScriptPath      = "/root/startup.sh"
+	endScriptPath        = "/root/resetpod.sh"
 )
 
 // CloudShellController reconciles a CloudShell object
@@ -219,6 +220,7 @@ func (c *CloudShellController) syncCloudShell(ctx context.Context, cloudshell *c
 			klog.ErrorS(err, "Failed to get pod", "cloudshell", klog.KObj(cloudshell))
 			return err
 		}
+		// TODO: pod is not running?
 
 		cloudshell.SetLabels(map[string]string{constants.CloudshellPodLabelKey: pod.Name})
 		if err := c.Update(context.TODO(), cloudshell); err != nil {
@@ -230,14 +232,14 @@ func (c *CloudShellController) syncCloudShell(ctx context.Context, cloudshell *c
 			return err
 		}
 
-		// TODO: pod is not running?
-
 		return c.CreateRouteRule(ctx, cloudshell)
 	}
 
-	// TODO:
+	// TODO: how to define its Finished state
 	if IsCloudshellFinished(cloudshell) {
-		// todo restore the pod, cleanup the kubeConfig
+		if err = c.resetPod(ctx, cloudshell); err != nil {
+			return err
+		}
 		_ = c.workerPool.Back(pod)
 
 		if cloudshell.Spec.Cleanup {
@@ -300,14 +302,14 @@ func (c *CloudShellController) StartPodForCloudShell(ctx context.Context, clouds
 func (c *CloudShellController) StartTTYd(ctx context.Context, cloudshell *cloudshellv1alpha1.CloudShell, kubeConfigByte []byte) error {
 	// copy kubeConfig
 	echoCommand := fmt.Sprintf("echo '%s' > %s", kubeConfigByte, KubeConfigPath)
-	if err := runCommand(cloudshell, []string{"bash", "-c", echoCommand}, kubeConfigByte); err != nil {
+	if err := execCommand(cloudshell, []string{"bash", "-c", echoCommand}, kubeConfigByte); err != nil {
 		return err
 	}
 
 	// start ttyd, ttyd args passed as shell parameter
 	// case: ttydCommand := []string{"/root/startup.sh", "100", "true", "false", "kubectl get po -n default"}
-	ttydCommand := []string{TTYdScriptPath, string(cloudshell.Spec.Ttl), fmt.Sprint(cloudshell.Spec.Once), fmt.Sprint(cloudshell.Spec.UrlArg), cloudshell.Spec.CommandAction}
-	if err := runCommand(cloudshell, ttydCommand, kubeConfigByte); err != nil {
+	ttydCommand := []string{startScriptPath, string(cloudshell.Spec.Ttl), fmt.Sprint(cloudshell.Spec.Once), fmt.Sprint(cloudshell.Spec.UrlArg), cloudshell.Spec.CommandAction}
+	if err := execCommand(cloudshell, ttydCommand, kubeConfigByte); err != nil {
 		return err
 	}
 
@@ -659,7 +661,9 @@ func (c *CloudShellController) removeCloudshell(ctx context.Context, cloudshell 
 			return err
 		}
 
-		// todo restore the pod, cleanup the kubeConfig
+		if err = c.resetPod(ctx, cloudshell); err != nil {
+			return err
+		}
 		_ = c.workerPool.Back(pod)
 	}
 
@@ -816,22 +820,22 @@ func hasBindPod(cloudshell *cloudshellv1alpha1.CloudShell) (string, bool) {
 	return podName, ok
 }
 
-func runCommand(cloudshell *cloudshellv1alpha1.CloudShell, command []string, kubeConfigByte []byte) error {
+func execCommand(cloudshell *cloudshellv1alpha1.CloudShell, command []string, kubeConfigByte []byte) error {
 	clientConfig, err := clientcmd.NewClientConfigFromBytes(kubeConfigByte)
 	if err != nil {
 		klog.V(4).ErrorS(err, "unable to create client config from kubeConfig bytes", "cloudshell", cloudshell.Name)
 		return err
 	}
 
-	clusterConfig, err := clientConfig.ClientConfig()
+	config, err := clientConfig.ClientConfig()
 	if err != nil {
 		return err
 	}
-	clusterConfig.GroupVersion = &corev1.SchemeGroupVersion
-	clusterConfig.NegotiatedSerializer = scheme.Codecs.WithoutConversion()
-	clusterConfig.APIPath = "/api"
+	config.GroupVersion = &corev1.SchemeGroupVersion
+	config.NegotiatedSerializer = scheme.Codecs.WithoutConversion()
+	config.APIPath = "/api"
 
-	clusterClient, err := kubernetes.NewForConfig(clusterConfig)
+	clusterClient, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		panic(err)
 	}
@@ -839,7 +843,7 @@ func runCommand(cloudshell *cloudshellv1alpha1.CloudShell, command []string, kub
 	options := &exec.ExecOptions{
 		Command:   command,
 		Executor:  &exec.DefaultRemoteExecutor{},
-		Config:    clusterConfig,
+		Config:    config,
 		PodClient: clusterClient.CoreV1(),
 		StreamOptions: exec.StreamOptions{
 			IOStreams: genericiooptions.IOStreams{
@@ -861,5 +865,21 @@ func runCommand(cloudshell *cloudshellv1alpha1.CloudShell, command []string, kub
 		klog.ErrorS(err, "failed to run command")
 		return err
 	}
+	return nil
+}
+
+// resetPod cleanup the kubeConfig and kill ttyd
+func (c *CloudShellController) resetPod(ctx context.Context, cloudshell *cloudshellv1alpha1.CloudShell) error {
+	secret := &corev1.Secret{}
+	if err := c.Client.Get(ctx, client.ObjectKey{Namespace: cloudshell.Namespace, Name: cloudshell.Spec.SecretRef.Name}, secret); err != nil {
+		return err
+	}
+	kubeConfigByte := secret.Data["config"]
+
+	cleanupCommand := []string{endScriptPath}
+	if err := execCommand(cloudshell, cleanupCommand, kubeConfigByte); err != nil {
+		return err
+	}
+
 	return nil
 }

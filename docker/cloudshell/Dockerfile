@@ -36,5 +36,6 @@ COPY --from=builder /app/dist/inline.html /usr/lib/ttyd/index.html
 
 WORKDIR /root
 RUN mkdir /root/.kube
-COPY ./startup.sh /root/
-RUN chmod +x startup.sh
+COPY ./startup.sh  /root/
+COPY ./resetpod.sh /root/
+RUN chmod +x startup.sh resetpod.sh
