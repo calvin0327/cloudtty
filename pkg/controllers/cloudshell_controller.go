@@ -278,8 +278,10 @@ func (c *CloudShellController) syncCloudShell(ctx context.Context, cloudshell *c
 	}
 	cloudshell.Status.AccessURL = url
 
-	now := metav1.Now()
-	cloudshell.Status.LastScheduleTime = &now
+	if cloudshell.Status.LastScheduleTime == nil {
+		now := metav1.Now()
+		cloudshell.Status.LastScheduleTime = &now
+	}
 
 	if err := c.UpdateCloudshellStatus(ctx, cloudshell, cloudshellv1alpha2.PhaseReady); err != nil {
 		return nil, err

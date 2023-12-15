@@ -12,6 +12,7 @@ type Interface interface {
 	Remove(item interface{})
 	Has(item interface{}) bool
 	All() []interface{}
+	Match(f func(item interface{}) bool) interface{}
 }
 
 type Type struct {
@@ -104,6 +105,19 @@ func (q *Type) Has(item interface{}) bool {
 	defer q.RWMutex.RUnlock()
 
 	return q.dirty.has(item)
+}
+
+func (q *Type) Match(f func(item interface{}) bool) interface{} {
+	q.RWMutex.RLock()
+	defer q.RWMutex.RUnlock()
+
+	for _, obj := range q.queue {
+		if f(obj) {
+			return obj
+		}
+	}
+
+	return nil
 }
 
 func (q *Type) All() []interface{} {

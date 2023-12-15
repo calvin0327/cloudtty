@@ -388,23 +388,17 @@ func (w *WorkerPool) Borrow(req *Request) (*corev1.Pod, error) {
 
 // matchWorkerRequest returns the worker name.
 func (w *WorkerPool) matchWorkerFor(req *Request) (*corev1.Pod, error) {
-	var workerName string
-	for _, item := range w.workerQueue.All() {
-		ns, name, image, _ := SplitWorkerKey(item.(string))
-
-		if ns == req.Namespace && image == req.Image {
-			workerName = name
-			break
-		}
-	}
-
-	if len(workerName) != 0 {
-		worker, err := w.podLister.Pods(req.Namespace).Get(workerName)
+	item := w.workerQueue.Match(func(item interface{}) bool {
+		ns, _, image, _ := SplitWorkerKey(item.(string))
+		return ns == req.Namespace && image == req.Image
+	})
+	if item != nil {
+		_, name, _, _ := SplitWorkerKey(item.(string))
+		worker, err := w.podLister.Pods(req.Namespace).Get(name)
 		// TODO: if err is notfound?
 		if err != nil {
 			return nil, err
 		}
-
 		return worker, nil
 	}
 
@@ -412,13 +406,14 @@ func (w *WorkerPool) matchWorkerFor(req *Request) (*corev1.Pod, error) {
 }
 
 func (w *WorkerPool) matchRequestFor(worker *corev1.Pod) *Request {
-	for _, item := range w.requestQueue.All() {
+	item := w.requestQueue.Match(func(item interface{}) bool {
 		req := item.(Request)
-
 		ttyd := worker.Spec.Containers[0]
-		if req.Namespace == worker.Namespace && req.Image == ttyd.Image {
-			return &req
-		}
+		return req.Namespace == worker.Namespace && req.Image == ttyd.Image
+	})
+	if item != nil {
+		req := item.(Request)
+		return &req
 	}
 
 	return nil
@@ -485,13 +480,13 @@ func (w *WorkerPool) createWorker(req *Request) error {
 		klog.ErrorS(err, "failed to decode pod manifest")
 		return err
 	}
+
 	pod := obj.(*corev1.Pod)
+	controllerutil.AddFinalizer(pod, ControllerFinalizer)
 
 	pod.SetLabels(map[string]string{
 		constants.WorkerOwnerLabelKey: "", constants.WorkerRequestLabelKey: req.Cloudshell,
 	})
-
-	controllerutil.AddFinalizer(pod, ControllerFinalizer)
 
 	return w.Create(context.TODO(), pod)
 }
