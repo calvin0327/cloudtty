@@ -2,6 +2,7 @@
 ## This is a YAML-formatted file.
 ## Declare variables to be passed into your templates.
 
+
 ## @param global cloudtty global config
 global:
   ## @param global.imageRegistry Global Docker image registry
