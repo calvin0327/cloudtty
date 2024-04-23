@@ -2,7 +2,7 @@
 
 简体中文 | [English](https://github.com/cloudtty/cloudtty/blob/main/README.md)
 
-CloudTTY 是专为 Kubernetes 云原生环境打造的 Web 终端和 Cloud Shell Operator。
+CloudTTY 是专为了 Kubernetes 云原生环境打造的 Web 终端和 Cloud Shell Operator。
 通过 CloudTTY，您可以轻松用浏览器打开一个终端窗口，操控多云资源。
 
 CloudTTY 意指云原生虚拟控制台，也称为 Cloud Shell（云壳）。
