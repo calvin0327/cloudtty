@@ -1,4 +1,4 @@
-# Image URL to use all building/pushing image targets
+## Image URL to use all building/pushing image targets
 
 # VERSION is the version of the binary.
 REVISION ?= $(shell git describe --tags --dirty 2>/dev/null)
